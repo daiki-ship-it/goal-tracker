@@ -762,7 +762,7 @@ if page == "📝 日次記録":
 
     schedule = entry["schedule"]
 
-    # Google Calendar の時間帯イベントをスロットにマッピング（空のスロットに自動反映）
+    # Google Calendar の時間帯イベントをスロットにマッピング（開始〜終了前まで全スロットに自動反映）
     gcal_time_slots: dict[str, str] = {}
     for ev in day_evs:
         if ev.get("all_day"):
@@ -770,15 +770,29 @@ if page == "📝 日次記録":
         s = ev.get("start", "")
         if not s:
             continue
-        iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
         try:
-            dt = datetime.fromisoformat(iso)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            local = dt.astimezone(gcal_tz)
-            slot = f"{local.hour}:{local.minute:02d}"
-            if slot not in gcal_time_slots:
-                gcal_time_slots[slot] = ev.get("summary", "")
+            s_iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
+            dt_start = datetime.fromisoformat(s_iso)
+            if dt_start.tzinfo is None:
+                dt_start = dt_start.replace(tzinfo=timezone.utc)
+            dt_start_local = dt_start.astimezone(gcal_tz)
+
+            e = ev.get("end", "")
+            if e:
+                e_iso = e.replace("Z", "+00:00") if e.endswith("Z") else e
+                dt_end = datetime.fromisoformat(e_iso)
+                if dt_end.tzinfo is None:
+                    dt_end = dt_end.replace(tzinfo=timezone.utc)
+                dt_end_local = dt_end.astimezone(gcal_tz)
+            else:
+                dt_end_local = dt_start_local + timedelta(minutes=30)
+
+            current = dt_start_local
+            while current < dt_end_local:
+                slot = f"{current.hour}:{current.minute:02d}"
+                if slot not in gcal_time_slots:
+                    gcal_time_slots[slot] = ev.get("summary", "")
+                current += timedelta(minutes=30)
         except ValueError:
             pass
 
