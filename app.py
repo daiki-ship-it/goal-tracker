@@ -173,6 +173,76 @@ def _cached_fetch_notion_tasks(
     )
 
 
+@st.cache_data(ttl=60)
+def _cached_fetch_google_events(
+    calendar_id: str,
+    time_min_iso: str,
+    time_max_iso: str,
+    cred_mtime: float,
+) -> tuple[list[dict], str | None]:
+    """Google Calendar から期間内のイベントをキャッシュ付きで取得。"""
+    import google_calendar_client as gcc
+    from googleapiclient.errors import HttpError
+
+    _ = cred_mtime
+    creds = gcc.get_credentials(interactive=False)
+    if creds is None:
+        return [], "Google 認証情報がありません（token.json を確認してください）。"
+    svc = gcc.build_calendar_service(creds)
+    try:
+        evs, _ = gcc.list_events(svc, calendar_id, time_min_iso, time_max_iso)
+        return evs, None
+    except HttpError as e:
+        return [], gcc.fetch_events_http_error_message(e, calendar_id)
+    except Exception as e:
+        return [], str(e)
+
+
+def _fetch_google_months_events(
+    cal_ids: tuple[str, ...],
+    months: set[tuple[int, int]],
+    cal_tz: ZoneInfo,
+    cred_mtime: float,
+) -> tuple[list[dict], list[tuple[str, str]]]:
+    """複数月・複数カレンダーのイベントを Google Calendar から取得して重複除去。"""
+    all_evs: list[dict] = []
+    errors: list[tuple[str, str]] = []
+    for y, m in sorted(months):
+        tmin, tmax = _month_bounds_utc_iso(y, m, cal_tz)
+        for cid in cal_ids:
+            evs, err = _cached_fetch_google_events(cid, tmin, tmax, cred_mtime)
+            if err:
+                errors.append((cid, err))
+            else:
+                all_evs = _merge_events_dedup(all_evs, evs)
+    return _sort_events_by_start(all_evs), errors
+
+
+@st.cache_data(ttl=60)
+def _cached_fetch_google_tasks(
+    day_iso: str,
+    tz_name: str,
+    cred_mtime: float,
+) -> tuple[list[dict], str | None]:
+    """Google Tasks から期限が day_iso のタスクをキャッシュ付きで取得。"""
+    import google_calendar_client as gcc
+    from googleapiclient.errors import HttpError
+
+    _ = cred_mtime
+    creds = gcc.get_credentials(interactive=False)
+    if creds is None:
+        return [], None
+    try:
+        tsvc = gcc.build_tasks_service(creds)
+        tz = ZoneInfo(tz_name)
+        return gcc.fetch_tasks_for_calendar_day_all_lists(tsvc, date.fromisoformat(day_iso), tz)
+    except HttpError as e:
+        import google_calendar_client as gcc2
+        return [], gcc2.fetch_tasks_http_error_message(e)
+    except Exception as e:
+        return [], str(e)
+
+
 def _task_is_google_date_only_due(due: str) -> bool:
     """Google が日付のみ期限でよく使う UTC 0:00（JST では 9:00 に見えるが時刻指定ではない）。"""
     iso = due.replace("Z", "+00:00") if due.endswith("Z") else due
@@ -426,6 +496,17 @@ if page == "📝 日次記録":
     is_configured = bool(notion_token and cal_db_id)
     token_hash = str(hash(notion_token or ""))
 
+    import google_calendar_client as gcc
+    gcal_tz_name = os.environ.get("GOOGLE_CALENDAR_TZ", "Asia/Tokyo")
+    gcal_tz = ZoneInfo(gcal_tz_name)
+    gcal_ids = gcc.parse_calendar_ids(os.environ.get("GOOGLE_CALENDAR_ID"))
+    _gcal_token_path = gcc.default_token_path()
+    try:
+        gcal_cred_mtime = os.path.getmtime(_gcal_token_path)
+    except OSError:
+        gcal_cred_mtime = 0.0
+    gcal_configured = gcal_cred_mtime > 0.0 and os.path.isfile(gcc.default_credentials_path())
+
     if "daily_date_input" not in st.session_state:
         st.session_state["daily_date_input"] = date.today()
     if "cal_view_y" not in st.session_state:
@@ -512,6 +593,14 @@ if page == "📝 日次記録":
         elif cal_db_id:
             st.caption("NOTION_TOKEN を設定後、この月の予定件数がグリッドに表示されます。")
 
+        gcal_month_errors: list[tuple[str, str]] = []
+        if gcal_configured:
+            months_needed_g = {(cy, cm), (selected_date.year, selected_date.month)}
+            gcal_evs, gcal_month_errors = _fetch_google_months_events(
+                gcal_ids, months_needed_g, gcal_tz, gcal_cred_mtime
+            )
+            month_events = _sort_events_by_start(_merge_events_dedup(month_events, gcal_evs))
+
         _render_month_day_grid(cy, cm, selected_date, today_local)
 
         with st.expander("日付を直接指定", expanded=False):
@@ -536,12 +625,22 @@ if page == "📝 日次記録":
         for (fy, fm), fmsg in sorted(month_failed.items()):
             st.warning(f"{fy}年{fm}月の予定を取得できませんでした: {fmsg}")
 
+        for gcal_err_cid, gcal_err_msg in gcal_month_errors:
+            st.warning(f"Google カレンダー ({_calendar_display_label(gcal_err_cid)}): {gcal_err_msg}")
+
     with col_ev:
         day_tasks: list[dict] = []
         tasks_err: str | None = None
         if is_configured and tasks_db_id:
             day_tasks, tasks_err = _cached_fetch_notion_tasks(
                 tasks_db_id, selected_date.isoformat(), tasks_date_prop, tasks_status_prop, token_hash
+            )
+
+        google_tasks: list[dict] = []
+        google_tasks_err: str | None = None
+        if gcal_configured:
+            google_tasks, google_tasks_err = _cached_fetch_google_tasks(
+                selected_date.isoformat(), gcal_tz_name, gcal_cred_mtime
             )
 
         st.markdown("**予定・タスク**")
@@ -555,19 +654,21 @@ if page == "📝 日次記録":
         if tasks_err:
             st.warning(tasks_err, icon="⚠️")
 
+        any_source_configured = is_configured or gcal_configured
+        notion_sel_ok = not is_configured or sel_month_key not in month_failed
         day_evs = (
             _events_for_day(month_events, selected_date, cal_tz)
-            if is_configured and sel_month_key not in month_failed
+            if any_source_configured
             else []
         )
 
         cal_block = ""
-        if not is_configured:
+        if not any_source_configured:
             cal_block = (
                 "<p style='opacity:0.85;margin:0'>未設定です。.env に NOTION_TOKEN と"
-                " NOTION_CALENDAR_DATABASE_ID を設定してください。</p>"
+                " NOTION_CALENDAR_DATABASE_ID、または Google カレンダー認証情報を設定してください。</p>"
             )
-        elif sel_month_key in month_failed:
+        elif not notion_sel_ok and not gcal_configured:
             msg = html.escape(month_failed[sel_month_key])
             cal_block = (
                 "<p style='opacity:0.85;margin:0'>この日が属する月の予定を取得できませんでした。</p>"
@@ -576,9 +677,6 @@ if page == "📝 日次記録":
         elif not day_evs:
             cal_block = (
                 "<p style='opacity:0.75;margin:0'>この日に表示する予定はありません。</p>"
-                "<p style='opacity:0.65;margin:0.35rem 0 0 0;font-size:0.85rem'>"
-                "設定した Notion データベースに予定がないか、別のデータベースに入っている可能性があります。"
-                "取得元は .env の <code>NOTION_CALENDAR_DATABASE_ID</code> で指定します。</p>"
             )
         else:
             items = "".join(
@@ -609,22 +707,40 @@ if page == "📝 日次記録":
         else:
             task_block = _format_tasks_html(day_tasks, cal_tz)
 
+        google_task_block = ""
+        if gcal_configured:
+            if google_tasks_err:
+                google_task_block = (
+                    f"<p style='opacity:0.85;margin:0'>Google タスクを取得できませんでした: "
+                    f"{html.escape(google_tasks_err)}</p>"
+                )
+            elif not google_tasks:
+                google_task_block = (
+                    "<p style='opacity:0.75;margin:0'>期限がこの日の Google タスクはありません。</p>"
+                )
+            else:
+                google_task_block = _format_tasks_html(google_tasks, gcal_tz)
+
         inner = (
             "<p style='margin:0 0 0.4rem 0;font-weight:600;opacity:0.95'>予定（カレンダー）</p>"
             + cal_block
             + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>タスク（Notion）</p>"
             + task_block
         )
+        if gcal_configured:
+            inner += (
+                "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>タスク（Google）</p>"
+                + google_task_block
+            )
 
         has_cal_list = bool(day_evs)
-        has_task_list = bool(day_tasks) and not tasks_err
+        has_task_list = (bool(day_tasks) and not tasks_err) or (bool(google_tasks) and not google_tasks_err)
         use_compact = (
-            is_configured
-            and sel_month_key not in month_failed
+            any_source_configured
             and not has_cal_list
             and not has_task_list
             and not tasks_err
-        ) or (not is_configured)
+        ) or (not any_source_configured)
 
         panel_class = "gt-day-events-panel"
         if use_compact:
