@@ -18,7 +18,7 @@ import json
 import os
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 
@@ -159,6 +159,64 @@ def fetch_events(
             break
 
     return out, None
+
+
+def fetch_upcoming_tasks(
+    database_id: str,
+    date_from: date,
+    date_prop: str = "Due",
+    status_prop: str | None = None,
+    token: str | None = None,
+    days_ahead: int = 180,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """タスク DB から date_from 以降（days_ahead 日以内）のタスクを取得。締切日付きで返す。"""
+    tok = token or get_token()
+    if not tok:
+        return [], "NOTION_TOKEN が未設定です。"
+
+    date_to = (date_from + timedelta(days=days_ahead)).isoformat()
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    filter_body: dict[str, Any] = {
+        "and": [
+            {"property": date_prop, "date": {"on_or_after": date_from.isoformat()}},
+            {"property": date_prop, "date": {"before": date_to}},
+        ]
+    }
+    body: dict[str, Any] = {
+        "filter": filter_body,
+        "page_size": 100,
+        "sorts": [{"property": date_prop, "direction": "ascending"}],
+    }
+    data, err = _do_post(url, body, tok)
+    if err:
+        return [], err
+
+    tasks: list[dict[str, Any]] = []
+    for page in (data or {}).get("results", []):
+        title = _extract_title(page)
+        props = page.get("properties", {})
+        date_val = _extract_date_prop(page, date_prop)
+        deadline_iso = (date_val.get("start") or "")[:10] if date_val else None
+        status = "needsAction"
+        if status_prop:
+            sp = props.get(status_prop)
+            if sp:
+                t = sp.get("type")
+                if t == "checkbox":
+                    status = "completed" if sp.get("checkbox") else "needsAction"
+                elif t == "status":
+                    name = (sp.get("status") or {}).get("name", "").lower()
+                    if name in ("done", "完了", "completed", "closed"):
+                        status = "completed"
+        tasks.append(
+            {
+                "id": page.get("id"),
+                "title": title,
+                "deadline_iso": deadline_iso,
+                "status": status,
+            }
+        )
+    return tasks, None
 
 
 def fetch_tasks_for_day(

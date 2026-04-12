@@ -243,6 +243,50 @@ def _cached_fetch_google_tasks(
         return [], str(e)
 
 
+@st.cache_data(ttl=60)
+def _cached_fetch_ai_launch_tasks(
+    database_id: str,
+    date_from_iso: str,
+    date_prop: str,
+    status_prop: str | None,
+    token_hash: str,
+) -> tuple[list[dict], str | None]:
+    """Notion AI ローンチ DB から date_from 以降の全タスクをキャッシュ付きで取得。"""
+    import notion_calendar_client as ncc
+
+    _ = token_hash
+    return ncc.fetch_upcoming_tasks(
+        database_id, date.fromisoformat(date_from_iso), date_prop, status_prop
+    )
+
+
+def _format_tasks_with_deadlines_html(tasks: list[dict]) -> str:
+    """タスクリストを締切日付きで HTML 化。"""
+    if not tasks:
+        return ""
+    parts: list[str] = []
+    for t in tasks:
+        title = html.escape(t.get("title") or "")
+        deadline_iso = t.get("deadline_iso")
+        date_label = ""
+        if deadline_iso:
+            try:
+                d = date.fromisoformat(deadline_iso)
+                date_label = (
+                    f"<span style='opacity:0.65;font-size:0.85rem;"
+                    f"margin-right:0.4rem'>{d.month}/{d.day}</span>"
+                )
+            except ValueError:
+                pass
+        if t.get("status") == "completed":
+            parts.append(
+                f"<li style='margin:0.35rem 0;opacity:0.55'>{date_label}<del>{title}</del></li>"
+            )
+        else:
+            parts.append(f"<li style='margin:0.35rem 0'>{date_label}{title}</li>")
+    return "<ul style='margin:0;padding-left:1.15rem'>" + "".join(parts) + "</ul>"
+
+
 def _task_is_google_date_only_due(due: str) -> bool:
     """Google が日付のみ期限でよく使う UTC 0:00（JST では 9:00 に見えるが時刻指定ではない）。"""
     iso = due.replace("Z", "+00:00") if due.endswith("Z") else due
@@ -487,13 +531,13 @@ if page == "📝 日次記録":
 
     tz_name = os.environ.get("NOTION_CALENDAR_TZ", "Asia/Tokyo")
     cal_tz = ZoneInfo(tz_name)
-    cal_db_id = os.environ.get("NOTION_CALENDAR_DATABASE_ID", "").strip()
-    cal_date_prop = os.environ.get("NOTION_CALENDAR_DATE_PROPERTY", "Date")
+    ai_launch_db_id = os.environ.get("NOTION_AI_LAUNCH_DATABASE_ID", "").strip()
+    ai_launch_date_prop = os.environ.get("NOTION_AI_LAUNCH_DATE_PROPERTY", "締切")
+    ai_launch_status_prop = os.environ.get("NOTION_AI_LAUNCH_STATUS_PROPERTY", "").strip() or None
     tasks_db_id = os.environ.get("NOTION_TASKS_DATABASE_ID", "").strip()
     tasks_date_prop = os.environ.get("NOTION_TASKS_DATE_PROPERTY", "Due")
     tasks_status_prop = os.environ.get("NOTION_TASKS_STATUS_PROPERTY", "").strip() or None
     notion_token = ncc.get_token()
-    is_configured = bool(notion_token and cal_db_id)
     token_hash = str(hash(notion_token or ""))
 
     import google_calendar_client as gcc
@@ -556,8 +600,6 @@ if page == "📝 日次記録":
     col_cal, col_ev = st.columns([1, 1], gap="large")
 
     month_events: list[dict] = []
-    month_failed: dict[tuple[int, int], str] = {}
-    sel_month_key = (selected_date.year, selected_date.month)
 
     with col_cal:
         nav1, nav2, nav3 = st.columns([1, 2.2, 1])
@@ -585,21 +627,13 @@ if page == "📝 日次記録":
             unsafe_allow_html=True,
         )
 
-        if is_configured:
-            months_needed = {(cy, cm), (selected_date.year, selected_date.month)}
-            month_events, month_failed = _fetch_notion_months_events(
-                cal_db_id, months_needed, cal_tz, cal_date_prop, token_hash
-            )
-        elif cal_db_id:
-            st.caption("NOTION_TOKEN を設定後、この月の予定件数がグリッドに表示されます。")
-
         gcal_month_errors: list[tuple[str, str]] = []
         if gcal_configured:
             months_needed_g = {(cy, cm), (selected_date.year, selected_date.month)}
             gcal_evs, gcal_month_errors = _fetch_google_months_events(
                 gcal_ids, months_needed_g, gcal_tz, gcal_cred_mtime
             )
-            month_events = _sort_events_by_start(_merge_events_dedup(month_events, gcal_evs))
+            month_events = _sort_events_by_start(gcal_evs)
 
         _render_month_day_grid(cy, cm, selected_date, today_local)
 
@@ -611,135 +645,101 @@ if page == "📝 日次記録":
                 on_change=_on_daily_date_change,
             )
 
-        if not notion_token:
-            st.warning(
-                "Notion との接続には `NOTION_TOKEN` が必要です。"
-                " `.env` に `NOTION_TOKEN=secret_xxx...` を追加してください。"
-            )
-        elif not cal_db_id:
-            st.warning(
-                "`NOTION_CALENDAR_DATABASE_ID` が未設定です。"
-                " Notion カレンダー用データベースの ID を `.env` に追加してください。"
-            )
-
-        for (fy, fm), fmsg in sorted(month_failed.items()):
-            st.warning(f"{fy}年{fm}月の予定を取得できませんでした: {fmsg}")
-
         for gcal_err_cid, gcal_err_msg in gcal_month_errors:
             st.warning(f"Google カレンダー ({_calendar_display_label(gcal_err_cid)}): {gcal_err_msg}")
 
     with col_ev:
-        day_tasks: list[dict] = []
-        tasks_err: str | None = None
-        if is_configured and tasks_db_id:
-            day_tasks, tasks_err = _cached_fetch_notion_tasks(
-                tasks_db_id, selected_date.isoformat(), tasks_date_prop, tasks_status_prop, token_hash
+        # Google Calendar イベント（選択日）
+        day_evs = (
+            _events_for_day(month_events, selected_date, gcal_tz)
+            if gcal_configured
+            else []
+        )
+
+        # AIローンチ関連タスク（締切が本日以降の全件）
+        ai_launch_tasks: list[dict] = []
+        ai_launch_err: str | None = None
+        if notion_token and ai_launch_db_id:
+            ai_launch_tasks, ai_launch_err = _cached_fetch_ai_launch_tasks(
+                ai_launch_db_id, today_local.isoformat(), ai_launch_date_prop, ai_launch_status_prop, token_hash
             )
 
-        google_tasks: list[dict] = []
-        google_tasks_err: str | None = None
-        if gcal_configured:
-            google_tasks, google_tasks_err = _cached_fetch_google_tasks(
-                selected_date.isoformat(), gcal_tz_name, gcal_cred_mtime
+        # 個人タスク関連（選択日が期限のタスク）
+        day_tasks: list[dict] = []
+        tasks_err: str | None = None
+        if notion_token and tasks_db_id:
+            day_tasks, tasks_err = _cached_fetch_notion_tasks(
+                tasks_db_id, selected_date.isoformat(), tasks_date_prop, tasks_status_prop, token_hash
             )
 
         st.markdown("**予定・タスク**")
         st.caption(
             "このアプリの日付・タイムゾーン基準で表示します。端末のカレンダーと日付がずれることがあります。"
         )
-        if month_failed and sel_month_key not in month_failed:
-            st.caption(
-                "※ 別の月の予定取得に失敗しています。左の警告を確認してください。"
-            )
         if tasks_err:
             st.warning(tasks_err, icon="⚠️")
+        if ai_launch_err:
+            st.warning(ai_launch_err, icon="⚠️")
 
-        any_source_configured = is_configured or gcal_configured
-        notion_sel_ok = not is_configured or sel_month_key not in month_failed
-        day_evs = (
-            _events_for_day(month_events, selected_date, cal_tz)
-            if any_source_configured
-            else []
-        )
-
-        cal_block = ""
-        if not any_source_configured:
+        # 予定（Google カレンダー）
+        if not gcal_configured:
             cal_block = (
-                "<p style='opacity:0.85;margin:0'>未設定です。.env に NOTION_TOKEN と"
-                " NOTION_CALENDAR_DATABASE_ID、または Google カレンダー認証情報を設定してください。</p>"
-            )
-        elif not notion_sel_ok and not gcal_configured:
-            msg = html.escape(month_failed[sel_month_key])
-            cal_block = (
-                "<p style='opacity:0.85;margin:0'>この日が属する月の予定を取得できませんでした。</p>"
-                f"<p style='margin:0.5rem 0 0 0;font-size:0.9rem;opacity:0.9'>{msg}</p>"
+                "<p style='opacity:0.75;margin:0'>Google カレンダーの認証情報がありません"
+                "（credentials.json / token.json を確認してください）。</p>"
             )
         elif not day_evs:
-            cal_block = (
-                "<p style='opacity:0.75;margin:0'>この日に表示する予定はありません。</p>"
-            )
+            cal_block = "<p style='opacity:0.75;margin:0'>この日に表示する予定はありません。</p>"
         else:
             items = "".join(
-                f"<li style='margin:0.35rem 0'>"
-                f"{_format_ev_line(ev, cal_tz)}</li>"
+                f"<li style='margin:0.35rem 0'>{_format_ev_line(ev, gcal_tz)}</li>"
                 for ev in day_evs
             )
             cal_block = f"<ul style='margin:0;padding-left:1.15rem'>{items}</ul>"
 
-        task_block = ""
-        if not is_configured:
-            pass
-        elif not tasks_db_id:
-            task_block = (
-                "<p style='opacity:0.75;margin:0.35rem 0 0 0;font-size:0.9rem'>"
-                "タスク表示には <code>NOTION_TASKS_DATABASE_ID</code> の設定が必要です。</p>"
+        # AIローンチ関連
+        if not notion_token or not ai_launch_db_id:
+            ai_block = (
+                "<p style='opacity:0.75;margin:0;font-size:0.9rem'>"
+                "NOTION_TOKEN / NOTION_AI_LAUNCH_DATABASE_ID を設定してください。</p>"
+            )
+        elif ai_launch_err:
+            ai_block = "<p style='opacity:0.85;margin:0'>取得できませんでした（上の警告を確認）。</p>"
+        elif not ai_launch_tasks:
+            ai_block = "<p style='opacity:0.75;margin:0'>今後の AIローンチタスクはありません。</p>"
+        else:
+            ai_block = _format_tasks_with_deadlines_html(ai_launch_tasks)
+
+        # 個人タスク関連
+        if not notion_token or not tasks_db_id:
+            personal_block = (
+                "<p style='opacity:0.75;margin:0;font-size:0.9rem'>"
+                "NOTION_TOKEN / NOTION_TASKS_DATABASE_ID を設定してください。</p>"
             )
         elif tasks_err:
-            task_block = (
-                "<p style='opacity:0.85;margin:0'>タスクを取得できませんでした（上の警告を確認）。</p>"
-            )
+            personal_block = "<p style='opacity:0.85;margin:0'>取得できませんでした（上の警告を確認）。</p>"
         elif not day_tasks:
-            task_block = (
+            personal_block = (
                 "<p style='opacity:0.75;margin:0'>期限がこの日のタスクはありません。</p>"
-                "<p style='opacity:0.65;margin:0.35rem 0 0 0;font-size:0.85rem'>"
-                "期限なしのタスクはここには出ません。</p>"
             )
         else:
-            task_block = _format_tasks_html(day_tasks, cal_tz)
-
-        google_task_block = ""
-        if gcal_configured:
-            if google_tasks_err:
-                google_task_block = (
-                    f"<p style='opacity:0.85;margin:0'>Google タスクを取得できませんでした: "
-                    f"{html.escape(google_tasks_err)}</p>"
-                )
-            elif not google_tasks:
-                google_task_block = (
-                    "<p style='opacity:0.75;margin:0'>期限がこの日の Google タスクはありません。</p>"
-                )
-            else:
-                google_task_block = _format_tasks_html(google_tasks, gcal_tz)
+            personal_block = _format_tasks_html(day_tasks, cal_tz)
 
         inner = (
             "<p style='margin:0 0 0.4rem 0;font-weight:600;opacity:0.95'>予定（カレンダー）</p>"
             + cal_block
-            + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>タスク（Notion）</p>"
-            + task_block
+            + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>AIローンチ関連</p>"
+            + ai_block
+            + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>個人タスク関連</p>"
+            + personal_block
         )
-        if gcal_configured:
-            inner += (
-                "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>タスク（Google）</p>"
-                + google_task_block
-            )
 
         has_cal_list = bool(day_evs)
-        has_task_list = (bool(day_tasks) and not tasks_err) or (bool(google_tasks) and not google_tasks_err)
+        has_task_list = bool(ai_launch_tasks) or bool(day_tasks)
+        any_source_configured = gcal_configured or bool(notion_token)
         use_compact = (
             any_source_configured
             and not has_cal_list
             and not has_task_list
-            and not tasks_err
         ) or (not any_source_configured)
 
         panel_class = "gt-day-events-panel"
