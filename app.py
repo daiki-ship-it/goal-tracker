@@ -437,7 +437,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "ページ",
-        ["📝 日次記録", "📖 過去の記録", "📊 四半期目標", "🏆 ライフミッション", "📈 分析"],
+        ["🏆 ライフミッション", "📊 四半期目標", "📝 日次記録", "📖 過去の記録", "📈 分析"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -1132,7 +1132,7 @@ elif page == "🏆 ライフミッション":
     fields_right = [
         ("work_purpose",     "あなたの仕事をする目的は何か？"),
         ("goal_5years",      "5年後の目標は何か？"),
-        ("goal_1year",       "この1年間の目標は何か？（締切：2027.3.31）"),
+        ("goal_1year",       "この1年間の目標は何か？"),
         ("goal_1year_why",   "この1年間あなたはなぜこの目標に到達する必要があるのか？目的は何か？"),
         ("goal_1year_who",   "あなたが目標に到達することは、誰のどのような役に立つことができるか？"),
         ("goal_1year_without","その目標が手に入らないと、どのような社絶な人生を想像することができるか？"),
@@ -1142,12 +1142,12 @@ elif page == "🏆 ライフミッション":
     for key, label in fields_left:
         with col_l:
             st.markdown(f'<div class="static-label">{label}</div>', unsafe_allow_html=True)
-            mission[key] = st.text_area(label, value=mission.get(key, ""), height=80,
+            mission[key] = st.text_area(label, value=mission.get(key, ""), height=150,
                                         key=f"lm_{key}", label_visibility="collapsed")
     for key, label in fields_right:
         with col_r:
             st.markdown(f'<div class="static-label">{label}</div>', unsafe_allow_html=True)
-            mission[key] = st.text_area(label, value=mission.get(key, ""), height=80,
+            mission[key] = st.text_area(label, value=mission.get(key, ""), height=150,
                                         key=f"lm_{key}", label_visibility="collapsed")
 
     st.markdown("---")
