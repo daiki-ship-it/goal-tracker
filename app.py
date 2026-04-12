@@ -787,7 +787,9 @@ if page == "📝 日次記録":
             else:
                 dt_end_local = dt_start_local + timedelta(minutes=30)
 
-            current = dt_start_local
+            # 開始時刻を直前の 30 分境界に丸めてから全スロットを埋める
+            rounded_minute = 0 if dt_start_local.minute < 30 else 30
+            current = dt_start_local.replace(minute=rounded_minute, second=0, microsecond=0)
             while current < dt_end_local:
                 slot = f"{current.hour}:{current.minute:02d}"
                 if slot not in gcal_time_slots:
