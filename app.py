@@ -11,7 +11,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 
-load_dotenv()
+load_dotenv(override=True)
 import database as db
 
 
