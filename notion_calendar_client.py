@@ -23,8 +23,16 @@ from typing import Any
 
 
 def get_token() -> str | None:
-    """NOTION_TOKEN または NOTION_API_KEY 環境変数からトークンを取得。"""
-    return os.environ.get("NOTION_TOKEN") or os.environ.get("NOTION_API_KEY")
+    """NOTION_TOKEN または NOTION_API_KEY 環境変数からトークンを取得。
+    Notion の新 UI が付ける 'secret_' プレフィックスは自動的に除去する。
+    """
+    raw = os.environ.get("NOTION_TOKEN") or os.environ.get("NOTION_API_KEY")
+    if not raw:
+        return None
+    # 新形式: "secret_ntn_xxx" → "ntn_xxx"（secret_ は表示上のプレフィックス）
+    if raw.startswith("secret_"):
+        return raw[len("secret_"):]
+    return raw
 
 
 def _headers(token: str) -> dict[str, str]:

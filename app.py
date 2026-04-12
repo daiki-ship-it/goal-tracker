@@ -515,8 +515,6 @@ if page == "📝 日次記録":
         _render_month_day_grid(cy, cm, selected_date, today_local)
 
         with st.expander("日付を直接指定", expanded=False):
-            if show_cal_help:
-                st.caption("遠い日付へ移動するときに使います。上のマスが主な操作です。")
             st.date_input(
                 "対象日",
                 key="daily_date_input",
