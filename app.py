@@ -762,6 +762,26 @@ if page == "📝 日次記録":
 
     schedule = entry["schedule"]
 
+    # Google Calendar の時間帯イベントをスロットにマッピング（空のスロットに自動反映）
+    gcal_time_slots: dict[str, str] = {}
+    for ev in day_evs:
+        if ev.get("all_day"):
+            continue
+        s = ev.get("start", "")
+        if not s:
+            continue
+        iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
+        try:
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local = dt.astimezone(gcal_tz)
+            slot = f"{local.hour}:{local.minute:02d}"
+            if slot not in gcal_time_slots:
+                gcal_time_slots[slot] = ev.get("summary", "")
+        except ValueError:
+            pass
+
     st.markdown("**TIME / この日の予定 / ゴールイメージ / GIVEできる価値**")
 
     updated_schedule = []
@@ -778,7 +798,7 @@ if page == "📝 日次記録":
         with c2:
             task = st.text_input(
                 "task",
-                value=row.get("task", ""),
+                value=row.get("task", "") or gcal_time_slots.get(row["time"], ""),
                 key=f"task_{dk}_{i}",
                 label_visibility="collapsed",
             )
