@@ -664,12 +664,12 @@ if page == "📝 日次記録":
                 ai_launch_db_id, today_local.isoformat(), ai_launch_date_prop, ai_launch_status_prop, token_hash
             )
 
-        # 個人タスク関連（選択日が期限のタスク）
+        # 個人タスク関連（締切が本日以降の全件）
         day_tasks: list[dict] = []
         tasks_err: str | None = None
         if notion_token and tasks_db_id:
-            day_tasks, tasks_err = _cached_fetch_notion_tasks(
-                tasks_db_id, selected_date.isoformat(), tasks_date_prop, tasks_status_prop, token_hash
+            day_tasks, tasks_err = _cached_fetch_ai_launch_tasks(
+                tasks_db_id, today_local.isoformat(), tasks_date_prop, tasks_status_prop, token_hash
             )
 
         st.markdown("**予定・タスク**")
@@ -719,10 +719,10 @@ if page == "📝 日次記録":
             personal_block = "<p style='opacity:0.85;margin:0'>取得できませんでした（上の警告を確認）。</p>"
         elif not day_tasks:
             personal_block = (
-                "<p style='opacity:0.75;margin:0'>期限がこの日のタスクはありません。</p>"
+                "<p style='opacity:0.75;margin:0'>今後の個人タスクはありません。</p>"
             )
         else:
-            personal_block = _format_tasks_html(day_tasks, cal_tz)
+            personal_block = _format_tasks_with_deadlines_html(day_tasks)
 
         inner = (
             "<p style='margin:0 0 0.4rem 0;font-weight:600;opacity:0.95'>予定（カレンダー）</p>"
