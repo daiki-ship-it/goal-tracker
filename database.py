@@ -184,16 +184,40 @@ def get_daily_entry(date_str: str) -> dict:
     conn.close()
     if row:
         d = dict(row)
-        d["schedule"] = json.loads(d["schedule"]) if d.get("schedule") else _default_schedule()
+        d["schedule"] = _migrate_schedule(json.loads(d["schedule"])) if d.get("schedule") else _default_schedule()
         d["actions"] = json.loads(d["actions"]) if d.get("actions") else _default_actions()
         return d
     return _empty_entry(date_str)
 
 
 def _default_schedule():
-    times = ["7:00","8:00","9:00","10:00","11:00","12:00","13:00",
-             "14:00","15:00","16:00","17:00","18:00","19:00","20:00","21:00","22:00","23:00","0:00"]
+    times = []
+    for h in range(4, 24):
+        times.append(f"{h}:00")
+        times.append(f"{h}:30")
+    times.append("0:00")
     return [{"time": t, "task": "", "goal_image": "", "give_value": ""} for t in times]
+
+
+def _migrate_schedule(saved: list) -> list:
+    """保存済みスケジュールを新しい時間軸（4:00〜0:00、30分刻み）にマイグレーション。
+    既存のデータは同じ時刻スロットに引き継ぐ。"""
+    new_slots = _default_schedule()
+    new_times = [s["time"] for s in new_slots]
+    # 既に新フォーマットと一致している場合はそのまま返す
+    saved_times = [s.get("time", "") for s in saved]
+    if saved_times == new_times:
+        return saved
+    existing = {s["time"]: s for s in saved}
+    return [
+        {
+            "time": slot["time"],
+            "task": existing.get(slot["time"], {}).get("task", ""),
+            "goal_image": existing.get(slot["time"], {}).get("goal_image", ""),
+            "give_value": existing.get(slot["time"], {}).get("give_value", ""),
+        }
+        for slot in new_slots
+    ]
 
 
 def _default_actions():

@@ -22,32 +22,19 @@ def _env_flag_true(name: str, *, default: str = "0") -> bool:
         v = default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
-from googleapiclient.errors import HttpError
-
-
 @st.cache_data(ttl=60)
-def _cached_fetch_month_events(
-    calendar_id: str,
+def _cached_fetch_notion_events(
+    database_id: str,
     time_min_iso: str,
     time_max_iso: str,
-    token_mtime: int,
-    tz_name: str,
-) -> tuple[list[dict], str | None, bool]:
-    """正規化済みイベントのみキャッシュ。戻り値は (events, api_error_message, truncated)。"""
-    import google_calendar_client as gcc
+    date_prop: str,
+    token_hash: str,
+) -> tuple[list[dict], str | None]:
+    """Notion DB から期間内のイベントをキャッシュ付きで取得。token_hash はキャッシュ無効化用。"""
+    import notion_calendar_client as ncc
 
-    _ = tz_name  # キャッシュキー用（TZ 変更時に古い結果を使わない）
-    creds = gcc.get_credentials(interactive=False)
-    if not creds:
-        return [], None, False
-    svc = gcc.build_calendar_service(creds)
-    try:
-        evs, truncated = gcc.list_events(svc, calendar_id, time_min_iso, time_max_iso)
-        return evs, None, truncated
-    except HttpError as e:
-        return [], gcc.fetch_events_http_error_message(e, calendar_id), False
-    except Exception as e:
-        return [], str(e), False
+    _ = token_hash
+    return ncc.fetch_events(database_id, time_min_iso, time_max_iso, date_prop)
 
 
 def _month_bounds_utc_iso(year: int, month: int, tz: ZoneInfo) -> tuple[str, str]:
@@ -170,28 +157,20 @@ def _format_partial_calendar_failures(errs: list[tuple[str, str]]) -> str:
 
 
 @st.cache_data(ttl=60)
-def _cached_fetch_tasks_for_day(
+def _cached_fetch_notion_tasks(
+    database_id: str,
     day_iso: str,
-    token_mtime: int,
-    tz_name: str,
+    date_prop: str,
+    status_prop: str | None,
+    token_hash: str,
 ) -> tuple[list[dict], str | None]:
-    """選択日に期限のある Google タスク。戻り値 (tasks, error_message)。"""
-    import google_calendar_client as gcc
+    """Notion タスク DB から期限が day_iso のタスクをキャッシュ付きで取得。"""
+    import notion_calendar_client as ncc
 
-    _ = tz_name
-    creds = gcc.get_credentials(interactive=False)
-    if not creds:
-        return [], None
-    cal_tz = ZoneInfo(tz_name)
-    d = date.fromisoformat(day_iso)
-    svc = gcc.build_tasks_service(creds)
-    try:
-        tasks, err = gcc.fetch_tasks_for_calendar_day_all_lists(svc, d, cal_tz)
-        return tasks, err
-    except HttpError as e:
-        return [], gcc.fetch_tasks_http_error_message(e)
-    except Exception as e:
-        return [], str(e)
+    _ = token_hash
+    return ncc.fetch_tasks_for_day(
+        database_id, date.fromisoformat(day_iso), date_prop, status_prop
+    )
 
 
 def _task_is_google_date_only_due(due: str) -> bool:
@@ -271,44 +250,27 @@ def _format_ev_line(
     return line
 
 
-def _fetch_months_events_merged(
-    cal_ids: tuple[str, ...],
+def _fetch_notion_months_events(
+    db_id: str,
     months: set[tuple[int, int]],
     cal_tz: ZoneInfo,
-    token_mtime: int,
-    tz_name: str,
-) -> tuple[list[dict], dict[tuple[int, int], str], bool, dict[tuple[int, int], str]]:
-    """複数カレンダー × 複数月を取得し iCalUID / id で重複除去。
+    date_prop: str,
+    token_hash: str,
+) -> tuple[list[dict], dict[tuple[int, int], str]]:
+    """複数月のイベントを Notion DB から取得して重複除去。
 
-    戻り値: (merged_events, {(年,月): 全失敗時のエラー}, truncated_any, partial_warnings)
-    partial_warnings: 一部のカレンダーだけ失敗した月の注意文（取得できた分は表示する）。
+    戻り値: (merged_events, {(年, 月): エラーメッセージ})
     """
     all_evs: list[dict] = []
     failed: dict[tuple[int, int], str] = {}
-    partial: dict[tuple[int, int], str] = {}
-    truncated_any = False
     for y, m in sorted(months):
         tmin, tmax = _month_bounds_utc_iso(y, m, cal_tz)
-        month_merged: list[dict] = []
-        errs: list[tuple[str, str]] = []
-        for cid in cal_ids:
-            evs, e, trunc = _cached_fetch_month_events(
-                cid, tmin, tmax, token_mtime, tz_name
-            )
-            if e:
-                errs.append((cid, e))
-            else:
-                month_merged = _merge_events_dedup(month_merged, evs)
-            if trunc:
-                truncated_any = True
-        if len(errs) == len(cal_ids):
-            failed[(y, m)] = _format_all_calendars_failed(errs)
+        evs, err = _cached_fetch_notion_events(db_id, tmin, tmax, date_prop, token_hash)
+        if err:
+            failed[(y, m)] = err
         else:
-            all_evs = _merge_events_dedup(all_evs, month_merged)
-            if errs:
-                partial[(y, m)] = _format_partial_calendar_failures(errs)
-    all_evs = _sort_events_by_start(all_evs)
-    return all_evs, failed, truncated_any, partial
+            all_evs = _merge_events_dedup(all_evs, evs)
+    return _sort_events_by_start(all_evs), failed
 
 
 def _render_month_day_grid(
@@ -451,15 +413,18 @@ with st.sidebar:
 # 📝 日次記録
 # ══════════════════════════════════════════════════════════
 if page == "📝 日次記録":
-    import google_calendar_client as gcc
+    import notion_calendar_client as ncc
 
-    tz_name = os.environ.get("GOOGLE_CALENDAR_TZ", "Asia/Tokyo")
+    tz_name = os.environ.get("NOTION_CALENDAR_TZ", "Asia/Tokyo")
     cal_tz = ZoneInfo(tz_name)
-    cal_id_env = os.environ.get("GOOGLE_CALENDAR_ID")
-    cal_ids = gcc.parse_calendar_ids(cal_id_env)
-    cred_path = os.environ.get("GOOGLE_CALENDAR_CREDENTIALS_PATH", "credentials.json")
-    token_path = os.environ.get("GOOGLE_CALENDAR_TOKEN_PATH", "token.json")
-    show_cal_help = _env_flag_true("GOOGLE_CALENDAR_SHOW_HELP", default="0")
+    cal_db_id = os.environ.get("NOTION_CALENDAR_DATABASE_ID", "").strip()
+    cal_date_prop = os.environ.get("NOTION_CALENDAR_DATE_PROPERTY", "Date")
+    tasks_db_id = os.environ.get("NOTION_TASKS_DATABASE_ID", "").strip()
+    tasks_date_prop = os.environ.get("NOTION_TASKS_DATE_PROPERTY", "Due")
+    tasks_status_prop = os.environ.get("NOTION_TASKS_STATUS_PROPERTY", "").strip() or None
+    notion_token = ncc.get_token()
+    is_configured = bool(notion_token and cal_db_id)
+    token_hash = str(hash(notion_token or ""))
 
     if "daily_date_input" not in st.session_state:
         st.session_state["daily_date_input"] = date.today()
@@ -511,9 +476,6 @@ if page == "📝 日次記録":
 
     month_events: list[dict] = []
     month_failed: dict[tuple[int, int], str] = {}
-    month_partial: dict[tuple[int, int], str] = {}
-    month_truncated = False
-    creds_file_ok = os.path.isfile(cred_path)
     sel_month_key = (selected_date.year, selected_date.month)
 
     with col_cal:
@@ -542,19 +504,13 @@ if page == "📝 日次記録":
             unsafe_allow_html=True,
         )
 
-        if os.path.isfile(token_path):
-            token_mtime = int(os.path.getmtime(token_path))
+        if is_configured:
             months_needed = {(cy, cm), (selected_date.year, selected_date.month)}
-            (
-                month_events,
-                month_failed,
-                month_truncated,
-                month_partial,
-            ) = _fetch_months_events_merged(
-                cal_ids, months_needed, cal_tz, token_mtime, tz_name
+            month_events, month_failed = _fetch_notion_months_events(
+                cal_db_id, months_needed, cal_tz, cal_date_prop, token_hash
             )
-        elif creds_file_ok:
-            st.caption("接続後、この月の予定件数がグリッドに表示されます。")
+        elif cal_db_id:
+            st.caption("NOTION_TOKEN を設定後、この月の予定件数がグリッドに表示されます。")
 
         _render_month_day_grid(cy, cm, selected_date, today_local)
 
@@ -568,160 +524,50 @@ if page == "📝 日次記録":
                 on_change=_on_daily_date_change,
             )
 
-        if show_cal_help:
-            st.caption(
-                f"予定の取得元（{len(cal_ids)} 本）: {_calendar_sources_caption(cal_ids)} ・ TZ: {tz_name}"
-            )
-            st.caption(
-                "Google のウェブ画面では複数カレンダーを重ねて表示できますが、"
-                "ここでは `.env` の `GOOGLE_CALENDAR_ID` に列挙したカレンダーだけを読みます。"
-            )
-            with st.expander("環境 ID（詳細）", expanded=False):
-                env_show = cal_id_env if cal_id_env is not None else "（未設定 → primary のみ）"
-                ids_line = ", ".join(cal_ids)
-                st.code(
-                    f"GOOGLE_CALENDAR_ID={env_show}\n"
-                    f"# 解釈後の一覧 ({len(cal_ids)} 本): {ids_line}\n"
-                    f"GOOGLE_CALENDAR_TZ={tz_name}",
-                    language=None,
-                )
-        if not creds_file_ok:
+        if not notion_token:
             st.warning(
-                f"Google 連携用の `{os.path.basename(cred_path)}` がありません。"
-                " `.env.example` の手順で OAuth JSON を配置してください。"
+                "Notion との接続には `NOTION_TOKEN` が必要です。"
+                " `.env` に `NOTION_TOKEN=secret_xxx...` を追加してください。"
             )
-        else:
-            if st.button("Google と接続（カレンダー + タスク・初回はブラウザ）", key="gcc_connect"):
-                gcc.get_credentials(interactive=True)
-                st.rerun()
-            if not os.path.isfile(token_path):
-                st.info(
-                    "初回のみ上のボタンで認証してください。"
-                    "ヘッドレス環境ではターミナルで `python google_calendar_client.py` も利用できます。"
-                )
+        elif not cal_db_id:
+            st.warning(
+                "`NOTION_CALENDAR_DATABASE_ID` が未設定です。"
+                " Notion カレンダー用データベースの ID を `.env` に追加してください。"
+            )
 
         for (fy, fm), fmsg in sorted(month_failed.items()):
             st.warning(f"{fy}年{fm}月の予定を取得できませんでした: {fmsg}")
 
-        for (fy, fm), pmsg in sorted(month_partial.items()):
-            st.warning(f"{fy}年{fm}月: {pmsg}")
-
-        if show_cal_help:
-            with st.expander("この月の予定一覧（確認用）", expanded=False):
-                view_events: list[dict] = []
-                view_err: str | None = None
-                view_trunc = False
-                view_partial_msg: str | None = None
-                if os.path.isfile(token_path):
-                    token_mtime = int(os.path.getmtime(token_path))
-                    v_failed: dict[tuple[int, int], str] = {}
-                    v_partial: dict[tuple[int, int], str] = {}
-                    view_events, v_failed, view_trunc, v_partial = _fetch_months_events_merged(
-                        cal_ids, {(cy, cm)}, cal_tz, token_mtime, tz_name
-                    )
-                    sk = (cy, cm)
-                    view_err = v_failed.get(sk)
-                    view_partial_msg = v_partial.get(sk)
-                if not os.path.isfile(token_path):
-                    st.caption("未接続のため表示できません。")
-                elif view_err:
-                    st.caption(view_err)
-                else:
-                    if view_partial_msg:
-                        st.warning(view_partial_msg)
-                    if view_events:
-                        rows = []
-                        for e in view_events:
-                            ld = _event_local_date(e, cal_tz)
-                            cid = e.get("calendar_id") or ""
-                            rows.append(
-                                {
-                                    "日付": ld.isoformat() if ld else "",
-                                    "開始": e.get("start"),
-                                    "終日": e.get("all_day"),
-                                    "件名": e.get("summary"),
-                                    "取得元": _calendar_display_label(cid)
-                                    if cid
-                                    else "",
-                                }
-                            )
-                        st.dataframe(rows, use_container_width=True, hide_index=True)
-                        if view_trunc:
-                            st.warning(
-                                f"いずれかのカレンダーで、この月の取得が "
-                                f"最大 {gcc.LIST_EVENTS_MAX_ITEMS} 件/カレンダー に達した可能性があります。"
-                                "それ以上ある場合、一覧が欠けます。"
-                            )
-                    else:
-                        st.caption("この月に該当する予定はありません。")
-
     with col_ev:
         day_tasks: list[dict] = []
         tasks_err: str | None = None
-        if os.path.isfile(token_path):
-            token_mtime_tasks = int(os.path.getmtime(token_path))
-            day_tasks, tasks_err = _cached_fetch_tasks_for_day(
-                selected_date.isoformat(), token_mtime_tasks, tz_name
+        if is_configured and tasks_db_id:
+            day_tasks, tasks_err = _cached_fetch_notion_tasks(
+                tasks_db_id, selected_date.isoformat(), tasks_date_prop, tasks_status_prop, token_hash
             )
 
-        if show_cal_help:
-            st.markdown("**Google（選択した日）**")
-            st.caption(
-                "右側は **選択中の日付** の **カレンダー予定** と **Google タスク（期限がこの日）** です。"
-                "左の「◀ ▶」は表示月だけが変わります。日付マスを押すとここが更新されます。"
-            )
-            st.markdown(
-                f"**選択中の日:** `{selected_date.isoformat()}`",
-                help="日付ピッカーまたはカレンダーのマスで変更できます。",
-            )
-            st.caption(
-                "スマホの Google カレンダーと **同じ日付** を選んでいるか確認してください。"
-                "（例: スマホが「8日」なのにここが「9日」だと、予定・タスクの内容が違って見えます。）"
-            )
-            st.caption(
-                "予定は **`.env` の `GOOGLE_CALENDAR_ID` に書いたカレンダー（複数ならカンマ区切り）** からだけ読みます。"
-                "ウェブのカレンダーと同じ「全部を重ねたビュー」ではありません。"
-            )
-            with st.expander("表示について", expanded=False):
-                ids_md = "、".join(f"`{c}`" for c in cal_ids)
-                st.markdown(
-                    f"""- **予定:** 次のカレンダー（計 {len(cal_ids)} 本）に存在するイベント: {ids_md}
-  - `GOOGLE_CALENDAR_ID` はカンマ区切りで複数指定できます（前後の空白は無視、重複は除きます）
-- **タスク:** Google Tasks の **期限の日付（設定タイムゾーンのカレンダー日）がこの日** のもの。**期限なしタスクは出ません**
-- **含まない:** 上記に含めていない **別の Google カレンダー**・Keep など
-- **終日が複数日:** 予定は期間中の各日に表示（時刻付き予定は開始日のみ）
-- **再認証:** タスク表示を追加したあと表示されない場合は `token.json` を削除して左から再接続
-- **キャッシュ:** 最大約 60 秒
-- **予定の件数上限:** **カレンダーごと・月ごと**に最大 **{gcc.LIST_EVENTS_MAX_ITEMS}** 件まで（複数カレンダーではその分 API 呼び出しが増えます）"""
-                )
-        else:
-            st.markdown("**予定・タスク**")
-            st.caption(
-                "このアプリの日付・タイムゾーン基準で表示します。端末のカレンダーと日付がずれることがあります。"
-            )
-        if month_truncated:
-            st.warning(
-                f"取得した月のいずれかで、**いずれかのカレンダー**において "
-                f"予定件数が上限（{gcc.LIST_EVENTS_MAX_ITEMS} 件/カレンダー・月）に達した可能性があります。"
-                "表示が欠けることがあります。"
-            )
+        st.markdown("**予定・タスク**")
+        st.caption(
+            "このアプリの日付・タイムゾーン基準で表示します。端末のカレンダーと日付がずれることがあります。"
+        )
         if month_failed and sel_month_key not in month_failed:
             st.caption(
                 "※ 別の月の予定取得に失敗しています。左の警告を確認してください。"
             )
-        if tasks_err and os.path.isfile(token_path):
+        if tasks_err:
             st.warning(tasks_err, icon="⚠️")
 
         day_evs = (
             _events_for_day(month_events, selected_date, cal_tz)
-            if os.path.isfile(token_path) and sel_month_key not in month_failed
+            if is_configured and sel_month_key not in month_failed
             else []
         )
 
         cal_block = ""
-        if not os.path.isfile(token_path):
+        if not is_configured:
             cal_block = (
-                "<p style='opacity:0.85;margin:0'>未接続です。左の「Google と接続」を実行してください。</p>"
+                "<p style='opacity:0.85;margin:0'>未設定です。.env に NOTION_TOKEN と"
+                " NOTION_CALENDAR_DATABASE_ID を設定してください。</p>"
             )
         elif sel_month_key in month_failed:
             msg = html.escape(month_failed[sel_month_key])
@@ -733,23 +579,24 @@ if page == "📝 日次記録":
             cal_block = (
                 "<p style='opacity:0.75;margin:0'>この日に表示する予定はありません。</p>"
                 "<p style='opacity:0.65;margin:0.35rem 0 0 0;font-size:0.85rem'>"
-                "設定した取得元カレンダーに予定がないか、別のサブカレンダーにだけ入っている可能性があります。"
-                "取得元は `.env` の <code>GOOGLE_CALENDAR_ID</code> で指定します。</p>"
+                "設定した Notion データベースに予定がないか、別のデータベースに入っている可能性があります。"
+                "取得元は .env の <code>NOTION_CALENDAR_DATABASE_ID</code> で指定します。</p>"
             )
         else:
-            multi_cal = len(cal_ids) > 1
             items = "".join(
                 f"<li style='margin:0.35rem 0'>"
-                f"{_format_ev_line(ev, cal_tz, show_calendar_source=multi_cal)}</li>"
+                f"{_format_ev_line(ev, cal_tz)}</li>"
                 for ev in day_evs
             )
             cal_block = f"<ul style='margin:0;padding-left:1.15rem'>{items}</ul>"
 
         task_block = ""
-        if not os.path.isfile(token_path):
+        if not is_configured:
+            pass
+        elif not tasks_db_id:
             task_block = (
                 "<p style='opacity:0.75;margin:0.35rem 0 0 0;font-size:0.9rem'>"
-                "タスクも未接続のため表示できません。</p>"
+                "タスク表示には <code>NOTION_TASKS_DATABASE_ID</code> の設定が必要です。</p>"
             )
         elif tasks_err:
             task_block = (
@@ -759,7 +606,7 @@ if page == "📝 日次記録":
             task_block = (
                 "<p style='opacity:0.75;margin:0'>期限がこの日のタスクはありません。</p>"
                 "<p style='opacity:0.65;margin:0.35rem 0 0 0;font-size:0.85rem'>"
-                "期限なしの ToDo は Google タスク上では別扱いのため、ここには出ません。</p>"
+                "期限なしのタスクはここには出ません。</p>"
             )
         else:
             task_block = _format_tasks_html(day_tasks, cal_tz)
@@ -767,19 +614,19 @@ if page == "📝 日次記録":
         inner = (
             "<p style='margin:0 0 0.4rem 0;font-weight:600;opacity:0.95'>予定（カレンダー）</p>"
             + cal_block
-            + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>タスク（Google Tasks）</p>"
+            + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>タスク（Notion）</p>"
             + task_block
         )
 
         has_cal_list = bool(day_evs)
         has_task_list = bool(day_tasks) and not tasks_err
         use_compact = (
-            os.path.isfile(token_path)
+            is_configured
             and sel_month_key not in month_failed
             and not has_cal_list
             and not has_task_list
             and not tasks_err
-        ) or (not os.path.isfile(token_path))
+        ) or (not is_configured)
 
         panel_class = "gt-day-events-panel"
         if use_compact:
@@ -935,12 +782,7 @@ if page == "📝 日次記録":
             label_visibility="collapsed",
         )
 
-    # 保存ボタン
-    st.markdown("---")
-    if st.button("💾 保存する", type="primary", use_container_width=True):
-        db.save_daily_entry(entry)
-        st.success("✅ 保存しました！")
-        st.rerun()
+    db.save_daily_entry(entry)
 
 
 # ══════════════════════════════════════════════════════════
@@ -1052,7 +894,7 @@ elif page == "📊 四半期目標":
         value=goals.get("intention", ""), height=100
     )
 
-    c1, c2, c3 = st.columns(3)
+    _spacer, c1, c2, c3, _trail = st.columns([2, 4, 4, 4, 0.5])
     for i, (col, month) in enumerate(zip([c1, c2, c3], months)):
         with col:
             key = f"month{i+1}_theme"
@@ -1074,14 +916,15 @@ elif page == "📊 四半期目標":
         )
 
     updated_kpi = []
-    header = st.columns([1, 1, 2, 2, 2, 2, 2, 2])
+    delete_index = None
+    header = st.columns([1, 1, 2, 2, 2, 2, 2, 2, 0.5])
     for col, label in zip(header, ["種別", "項目", f"{months[0]}月 目標", f"{months[0]}月 結果",
                                     f"{months[1]}月 目標", f"{months[1]}月 結果",
-                                    f"{months[2]}月 目標", f"{months[2]}月 結果"]):
+                                    f"{months[2]}月 目標", f"{months[2]}月 結果", ""]):
         col.markdown(f"**{label}**")
 
     for i, row in enumerate(kpi_rows):
-        cols = st.columns([1, 1, 2, 2, 2, 2, 2, 2])
+        cols = st.columns([1, 1, 2, 2, 2, 2, 2, 2, 0.5])
         r_type = cols[0].selectbox("type", ["KGI", "KPI"], index=0 if row.get("type") == "KGI" else 1,
                                    key=f"ktype_{i}", label_visibility="collapsed")
         label = cols[1].text_input("label", value=row.get("label", ""), key=f"klabel_{i}", label_visibility="collapsed")
@@ -1091,6 +934,8 @@ elif page == "📊 四半期目標":
         m2r = cols[5].text_input("m2r", value=row.get("month2_result", ""), key=f"m2r_{i}", label_visibility="collapsed")
         m3g = cols[6].text_input("m3g", value=row.get("month3_goal", ""), key=f"m3g_{i}", label_visibility="collapsed")
         m3r = cols[7].text_input("m3r", value=row.get("month3_result", ""), key=f"m3r_{i}", label_visibility="collapsed")
+        if cols[8].button("×", key=f"del_{i}"):
+            delete_index = i
         updated_kpi.append({
             "type": r_type, "label": label,
             "month1_goal": m1g, "month1_result": m1r,
@@ -1098,16 +943,21 @@ elif page == "📊 四半期目標":
             "month3_goal": m3g, "month3_result": m3r,
         })
 
+    if delete_index is not None:
+        updated_kpi.pop(delete_index)
+        db.save_quarterly_goals(year, quarter, goals)
+        db.save_quarterly_kpi(year, quarter, updated_kpi)
+        st.rerun()
+
     if st.button("行を追加"):
         updated_kpi.append({"type": "KPI", "label": "", "month1_goal": "", "month1_result": "",
                              "month2_goal": "", "month2_result": "", "month3_goal": "", "month3_result": ""})
-
-    st.markdown("---")
-    if st.button("💾 保存する", type="primary", use_container_width=True):
         db.save_quarterly_goals(year, quarter, goals)
         db.save_quarterly_kpi(year, quarter, updated_kpi)
-        st.success("✅ 保存しました！")
         st.rerun()
+
+    db.save_quarterly_goals(year, quarter, goals)
+    db.save_quarterly_kpi(year, quarter, updated_kpi)
 
 
 # ══════════════════════════════════════════════════════════
@@ -1150,11 +1000,7 @@ elif page == "🏆 ライフミッション":
             mission[key] = st.text_area(label, value=mission.get(key, ""), height=150,
                                         key=f"lm_{key}", label_visibility="collapsed")
 
-    st.markdown("---")
-    if st.button("💾 保存する", type="primary", use_container_width=True):
-        db.save_life_mission(mission)
-        st.success("✅ 保存しました！")
-        st.rerun()
+    db.save_life_mission(mission)
 
 
 # ══════════════════════════════════════════════════════════
