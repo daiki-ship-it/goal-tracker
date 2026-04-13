@@ -1067,27 +1067,26 @@ elif page == "📊 四半期目標":
 
     updated_kpi = []
     delete_index = None
-    header = st.columns([1, 1, 2, 2, 2, 2, 2, 2, 0.5])
-    for col, label in zip(header, ["種別", "項目", f"{months[0]}月 目標", f"{months[0]}月 結果",
+    header = st.columns([1, 2, 2, 2, 2, 2, 2, 0.5])
+    for col, label in zip(header, ["種別", f"{months[0]}月 目標", f"{months[0]}月 結果",
                                     f"{months[1]}月 目標", f"{months[1]}月 結果",
                                     f"{months[2]}月 目標", f"{months[2]}月 結果", ""]):
         col.markdown(f"**{label}**")
 
     for i, row in enumerate(kpi_rows):
-        cols = st.columns([1, 1, 2, 2, 2, 2, 2, 2, 0.5])
+        cols = st.columns([1, 2, 2, 2, 2, 2, 2, 0.5])
         r_type = cols[0].selectbox("type", ["KGI", "KPI"], index=0 if row.get("type") == "KGI" else 1,
                                    key=f"ktype_{i}", label_visibility="collapsed")
-        label = cols[1].text_input("label", value=row.get("label", ""), key=f"klabel_{i}", label_visibility="collapsed")
-        m1g = cols[2].text_input("m1g", value=row.get("month1_goal", ""), key=f"m1g_{i}", label_visibility="collapsed")
-        m1r = cols[3].text_input("m1r", value=row.get("month1_result", ""), key=f"m1r_{i}", label_visibility="collapsed")
-        m2g = cols[4].text_input("m2g", value=row.get("month2_goal", ""), key=f"m2g_{i}", label_visibility="collapsed")
-        m2r = cols[5].text_input("m2r", value=row.get("month2_result", ""), key=f"m2r_{i}", label_visibility="collapsed")
-        m3g = cols[6].text_input("m3g", value=row.get("month3_goal", ""), key=f"m3g_{i}", label_visibility="collapsed")
-        m3r = cols[7].text_input("m3r", value=row.get("month3_result", ""), key=f"m3r_{i}", label_visibility="collapsed")
-        if cols[8].button("×", key=f"del_{i}"):
+        m1g = cols[1].text_area("m1g", value=row.get("month1_goal", ""), key=f"m1g_{i}", label_visibility="collapsed", height=100)
+        m1r = cols[2].text_area("m1r", value=row.get("month1_result", ""), key=f"m1r_{i}", label_visibility="collapsed", height=100)
+        m2g = cols[3].text_area("m2g", value=row.get("month2_goal", ""), key=f"m2g_{i}", label_visibility="collapsed", height=100)
+        m2r = cols[4].text_area("m2r", value=row.get("month2_result", ""), key=f"m2r_{i}", label_visibility="collapsed", height=100)
+        m3g = cols[5].text_area("m3g", value=row.get("month3_goal", ""), key=f"m3g_{i}", label_visibility="collapsed", height=100)
+        m3r = cols[6].text_area("m3r", value=row.get("month3_result", ""), key=f"m3r_{i}", label_visibility="collapsed", height=100)
+        if cols[7].button("×", key=f"del_{i}"):
             delete_index = i
         updated_kpi.append({
-            "type": r_type, "label": label,
+            "type": r_type, "label": row.get("label", ""),
             "month1_goal": m1g, "month1_result": m1r,
             "month2_goal": m2g, "month2_result": m2r,
             "month3_goal": m3g, "month3_result": m3r,
