@@ -937,7 +937,6 @@ if page == "📝 日次記録":
         with c2:
             task = st.text_input(
                 "task",
-                value=row.get("task", "") or gcal_time_slots.get(row["time"], ""),
                 key=f"task_{dk}_{i}",
                 label_visibility="collapsed",
             )
