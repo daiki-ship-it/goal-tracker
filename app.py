@@ -490,25 +490,39 @@ st.markdown("""
 
 
 def _inject_textarea_autoresize() -> None:
-    """テキストエリアをコンテンツに応じて自動リサイズするJSを注入。"""
+    """テキストエリアをコンテンツに応じて自動リサイズするJSを注入。同じ行の全セルを同一高さに揃える。"""
     components.html(
         """
         <script>
         (function() {
             const doc = window.parent.document;
 
-            function resize(el) {
-                el.style.overflowY = 'hidden';
-                el.style.height = 'auto';
-                el.style.height = Math.max(el.scrollHeight, 48) + 'px';
+            function getRowTextareas(el) {
+                const row = el.closest('[data-testid="stHorizontalBlock"]');
+                return row ? Array.from(row.querySelectorAll('textarea')) : [el];
+            }
+
+            function resizeRow(trigger) {
+                const textareas = getRowTextareas(trigger);
+                // 一度 0px にすることで scrollHeight が縮小方向にも正しく算出される
+                textareas.forEach(function(t) {
+                    t.style.overflowY = 'hidden';
+                    t.style.height = '0px';
+                });
+                const maxH = Math.max.apply(null, textareas.map(function(t) {
+                    return Math.max(t.scrollHeight, 48);
+                }));
+                textareas.forEach(function(t) {
+                    t.style.height = maxH + 'px';
+                });
             }
 
             function setup() {
                 doc.querySelectorAll('textarea').forEach(function(el) {
                     if (el.dataset.arInit) return;
                     el.dataset.arInit = '1';
-                    resize(el);
-                    el.addEventListener('input', function() { resize(el); });
+                    resizeRow(el);
+                    el.addEventListener('input', function() { resizeRow(el); });
                 });
             }
 
