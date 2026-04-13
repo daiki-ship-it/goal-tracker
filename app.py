@@ -393,6 +393,7 @@ def _render_month_day_grid(
     month: int,
     selected: date,
     today: date,
+    on_nav=None,
 ) -> None:
     cal = calendar.Calendar(firstweekday=calendar.MONDAY)
     weeks = cal.monthdatescalendar(year, month)
@@ -428,6 +429,8 @@ def _render_month_day_grid(
                     type="primary" if is_sel else "secondary",
                     help=help_txt,
                 ):
+                    if on_nav:
+                        on_nav()
                     st.session_state["daily_date_input"] = d
                     st.session_state["cal_view_y"] = d.year
                     st.session_state["cal_view_m"] = d.month
@@ -496,6 +499,13 @@ def _inject_textarea_autoresize() -> None:
         <script>
         (function() {
             const doc = window.parent.document;
+            const win = window.parent;
+
+            // 以前のインターバルをクリアして蓄積を防ぐ
+            if (win._gt_ar_timer != null) {
+                win.clearInterval(win._gt_ar_timer);
+                win._gt_ar_timer = null;
+            }
 
             function getRowTextareas(el) {
                 const row = el.closest('[data-testid="stHorizontalBlock"]');
@@ -504,15 +514,26 @@ def _inject_textarea_autoresize() -> None:
 
             function resizeRow(trigger) {
                 const textareas = getRowTextareas(trigger);
-                // 一度 0px にすることで scrollHeight が縮小方向にも正しく算出される
+                const activeEl = doc.activeElement;
+
+                // 各テキストエリアの必要な高さを計測（フォーカス中は0pxにしない）
+                const heights = textareas.map(function(t) {
+                    if (t === activeEl) {
+                        // フォーカス中はscrollHeightをそのまま使用
+                        return Math.max(t.scrollHeight, 48);
+                    } else {
+                        const prev = t.style.height;
+                        t.style.overflowY = 'hidden';
+                        t.style.height = '0px';
+                        const h = Math.max(t.scrollHeight, 48);
+                        t.style.height = prev;
+                        return h;
+                    }
+                });
+
+                const maxH = Math.max.apply(null, heights);
                 textareas.forEach(function(t) {
                     t.style.overflowY = 'hidden';
-                    t.style.height = '0px';
-                });
-                const maxH = Math.max.apply(null, textareas.map(function(t) {
-                    return Math.max(t.scrollHeight, 48);
-                }));
-                textareas.forEach(function(t) {
                     t.style.height = maxH + 'px';
                 });
             }
@@ -527,8 +548,8 @@ def _inject_textarea_autoresize() -> None:
             }
 
             setup();
-            // Streamlit の再レンダリングに対応するため定期的に再スキャン
-            setInterval(setup, 400);
+            // 親ウィンドウのsetIntervalに保存して蓄積を防ぐ
+            win._gt_ar_timer = win.setInterval(setup, 500);
         })();
         </script>
         """,
@@ -639,6 +660,55 @@ if page == "📝 日次記録":
     selected_date = st.session_state["daily_date_input"]
     today_local = datetime.now(cal_tz).date()
 
+    # entryを早期に読み込む（ナビゲーション前の保存コールバックで使用するため）
+    dk = st.session_state["daily_date_input"].isoformat()
+    entry = db.get_daily_entry(dk)
+
+    def _save_from_session() -> None:
+        """ナビゲーション前にsession_stateから現在の入力値を読み取ってDBに保存する。"""
+        schedule_rows = entry.get("schedule", [])
+        actions_rows = entry.get("actions", [])
+
+        updated_schedule = []
+        for i, row in enumerate(schedule_rows):
+            updated_schedule.append({
+                "time": row["time"],
+                "task": st.session_state.get(f"task_{dk}_{i}", row.get("task", "")),
+                "goal_image": st.session_state.get(f"goal_{dk}_{i}", row.get("goal_image", "")),
+                "give_value": st.session_state.get(f"give_{dk}_{i}", row.get("give_value", "")),
+            })
+        entry["schedule"] = updated_schedule
+
+        for key in ["image_q1", "image_q2", "image_q3", "image_q4", "image_q5", "image_q6"]:
+            sk = f"img_{dk}_{key}"
+            if sk in st.session_state:
+                entry[key] = st.session_state[sk]
+
+        updated_actions = []
+        for i, row in enumerate(actions_rows):
+            updated_actions.append({
+                "time": st.session_state.get(f"at_{dk}_{i}", row.get("time", "")),
+                "action": st.session_state.get(f"aa_{dk}_{i}", row.get("action", "")),
+                "result": st.session_state.get(f"ar_{dk}_{i}", row.get("result", "")),
+                "next_learning": st.session_state.get(f"an_{dk}_{i}", row.get("next_learning", "")),
+            })
+        entry["actions"] = updated_actions
+
+        for key in [
+            "problem", "problem_root", "problem_source", "problem_research_internal",
+            "problem_solution", "problem_research_same", "problem_absolute",
+            "problem_research_other", "problem_principle", "problem_premise",
+            "problem_blind_spot", "problem_prevention",
+        ]:
+            sk = f"prob_{dk}_{key}"
+            if sk in st.session_state:
+                entry[key] = st.session_state[sk]
+
+        if f"msg_{dk}" in st.session_state:
+            entry["message"] = st.session_state[f"msg_{dk}"]
+
+        db.save_daily_entry(entry)
+
     st.title(f"📝 {fmt_date(selected_date.isoformat())}")
     if selected_date != today_local:
         st.info(
@@ -653,6 +723,7 @@ if page == "📝 日次記録":
         nav1, nav2, nav3 = st.columns([1, 2.2, 1])
         with nav1:
             if st.button("◀", help="前の月（表示のみ）", key="cal_nav_prev"):
+                _save_from_session()
                 if cm == 1:
                     st.session_state["cal_view_y"] = cy - 1
                     st.session_state["cal_view_m"] = 12
@@ -661,6 +732,7 @@ if page == "📝 日次記録":
                 st.rerun()
         with nav3:
             if st.button("▶", help="次の月（表示のみ）", key="cal_nav_next"):
+                _save_from_session()
                 if cm == 12:
                     st.session_state["cal_view_y"] = cy + 1
                     st.session_state["cal_view_m"] = 1
@@ -683,7 +755,7 @@ if page == "📝 日次記録":
             )
             month_events = _sort_events_by_start(gcal_evs)
 
-        _render_month_day_grid(cy, cm, selected_date, today_local)
+        _render_month_day_grid(cy, cm, selected_date, today_local, on_nav=_save_from_session)
 
         with st.expander("日付を直接指定", expanded=False):
             st.date_input(
@@ -798,9 +870,6 @@ if page == "📝 日次記録":
             f'<div class="{panel_class}">{inner}</div>',
             unsafe_allow_html=True,
         )
-
-    dk = st.session_state["daily_date_input"].isoformat()
-    entry = db.get_daily_entry(dk)
 
     day_label = "今日" if selected_date == today_local else "この日"
     st.markdown(
