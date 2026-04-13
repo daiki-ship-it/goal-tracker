@@ -118,7 +118,7 @@ def save_life_mission(data: dict):
 
 # ─── 四半期目標 ─────────────────────────────────────────────
 
-QUARTERLY_KEYS = ["intention", "month1_theme", "month2_theme", "month3_theme"]
+QUARTERLY_KEYS = ["intention", "month1_theme", "month2_theme", "month3_theme", "kpi_memo"]
 
 def get_quarterly_goals(year: int, quarter: int) -> dict:
     conn = get_connection()

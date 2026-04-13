@@ -1154,6 +1154,14 @@ elif page == "📊 四半期目標":
         db.save_quarterly_kpi(year, quarter, updated_kpi)
         st.rerun()
 
+    st.markdown("---")
+    goals["kpi_memo"] = st.text_area(
+        "📝 メモ（KGI/KPIを設定した理由・達成に向けたアクションアイデアなど）",
+        value=goals.get("kpi_memo", ""),
+        height=150,
+        placeholder="例）なぜこのKGI/KPIを設定したか、達成するために必要な工夫や具体的なアクションを書いておきましょう。",
+    )
+
     db.save_quarterly_goals(year, quarter, goals)
     db.save_quarterly_kpi(year, quarter, updated_kpi)
     _inject_textarea_autoresize()
