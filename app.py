@@ -8,6 +8,7 @@ from datetime import datetime, date, timedelta, timezone
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 
@@ -488,6 +489,39 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def _inject_textarea_autoresize() -> None:
+    """テキストエリアをコンテンツに応じて自動リサイズするJSを注入。"""
+    components.html(
+        """
+        <script>
+        (function() {
+            const doc = window.parent.document;
+
+            function resize(el) {
+                el.style.overflowY = 'hidden';
+                el.style.height = 'auto';
+                el.style.height = Math.max(el.scrollHeight, 48) + 'px';
+            }
+
+            function setup() {
+                doc.querySelectorAll('textarea').forEach(function(el) {
+                    if (el.dataset.arInit) return;
+                    el.dataset.arInit = '1';
+                    resize(el);
+                    el.addEventListener('input', function() { resize(el); });
+                });
+            }
+
+            setup();
+            // Streamlit の再レンダリングに対応するため定期的に再スキャン
+            setInterval(setup, 400);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 # ─── ユーティリティ ────────────────────────────────────────
 def current_quarter(d: date) -> tuple[int, int]:
     q = (d.month - 1) // 3 + 1
@@ -857,7 +891,7 @@ if page == "📝 日次記録":
             st.markdown(f'<div class="static-label">{label}</div>', unsafe_allow_html=True)
             entry[key] = st.text_area(
                 label, value=entry.get(key, ""),
-                height=90, key=f"img_{dk}_{key}",
+                height=68, key=f"img_{dk}_{key}",
                 label_visibility="collapsed",
             )
 
@@ -917,7 +951,7 @@ if page == "📝 日次記録":
                 entry[key] = st.text_area(
                     label,
                     value=entry.get(key, ""),
-                    height=80,
+                    height=68,
                     key=f"prob_{dk}_{key}",
                     label_visibility="collapsed",
                 )
@@ -927,12 +961,13 @@ if page == "📝 日次記録":
         entry["message"] = st.text_area(
             "メッセージ",
             value=entry.get("message", ""),
-            height=120,
+            height=68,
             key=f"msg_{dk}",
             label_visibility="collapsed",
         )
 
     db.save_daily_entry(entry)
+    _inject_textarea_autoresize()
 
 
 # ══════════════════════════════════════════════════════════
@@ -1041,7 +1076,7 @@ elif page == "📊 四半期目標":
 
     goals["intention"] = st.text_area(
         "この四半期、何を意図して仕事をするか？",
-        value=goals.get("intention", ""), height=100
+        value=goals.get("intention", ""), height=68
     )
 
     _spacer, c1, c2, c3, _trail = st.columns([2, 4, 4, 4, 0.5])
@@ -1050,7 +1085,7 @@ elif page == "📊 四半期目標":
             key = f"month{i+1}_theme"
             goals[key] = st.text_area(
                 f"{month}月：この月、何を意図すると価値があるか？",
-                value=goals.get(key, ""), height=80
+                value=goals.get(key, ""), height=68
             )
 
     # KGI/KPI テーブル
@@ -1077,12 +1112,12 @@ elif page == "📊 四半期目標":
         cols = st.columns([1, 2, 2, 2, 2, 2, 2, 0.5])
         r_type = cols[0].selectbox("type", ["KGI", "KPI"], index=0 if row.get("type") == "KGI" else 1,
                                    key=f"ktype_{i}", label_visibility="collapsed")
-        m1g = cols[1].text_area("m1g", value=row.get("month1_goal", ""), key=f"m1g_{i}", label_visibility="collapsed", height=100)
-        m1r = cols[2].text_area("m1r", value=row.get("month1_result", ""), key=f"m1r_{i}", label_visibility="collapsed", height=100)
-        m2g = cols[3].text_area("m2g", value=row.get("month2_goal", ""), key=f"m2g_{i}", label_visibility="collapsed", height=100)
-        m2r = cols[4].text_area("m2r", value=row.get("month2_result", ""), key=f"m2r_{i}", label_visibility="collapsed", height=100)
-        m3g = cols[5].text_area("m3g", value=row.get("month3_goal", ""), key=f"m3g_{i}", label_visibility="collapsed", height=100)
-        m3r = cols[6].text_area("m3r", value=row.get("month3_result", ""), key=f"m3r_{i}", label_visibility="collapsed", height=100)
+        m1g = cols[1].text_area("m1g", value=row.get("month1_goal", ""), key=f"m1g_{i}", label_visibility="collapsed", height=68)
+        m1r = cols[2].text_area("m1r", value=row.get("month1_result", ""), key=f"m1r_{i}", label_visibility="collapsed", height=68)
+        m2g = cols[3].text_area("m2g", value=row.get("month2_goal", ""), key=f"m2g_{i}", label_visibility="collapsed", height=68)
+        m2r = cols[4].text_area("m2r", value=row.get("month2_result", ""), key=f"m2r_{i}", label_visibility="collapsed", height=68)
+        m3g = cols[5].text_area("m3g", value=row.get("month3_goal", ""), key=f"m3g_{i}", label_visibility="collapsed", height=68)
+        m3r = cols[6].text_area("m3r", value=row.get("month3_result", ""), key=f"m3r_{i}", label_visibility="collapsed", height=68)
         if cols[7].button("×", key=f"del_{i}"):
             delete_index = i
         updated_kpi.append({
@@ -1107,6 +1142,7 @@ elif page == "📊 四半期目標":
 
     db.save_quarterly_goals(year, quarter, goals)
     db.save_quarterly_kpi(year, quarter, updated_kpi)
+    _inject_textarea_autoresize()
 
 
 # ══════════════════════════════════════════════════════════
@@ -1141,15 +1177,16 @@ elif page == "🏆 ライフミッション":
     for key, label in fields_left:
         with col_l:
             st.markdown(f'<div class="static-label">{label}</div>', unsafe_allow_html=True)
-            mission[key] = st.text_area(label, value=mission.get(key, ""), height=150,
+            mission[key] = st.text_area(label, value=mission.get(key, ""), height=68,
                                         key=f"lm_{key}", label_visibility="collapsed")
     for key, label in fields_right:
         with col_r:
             st.markdown(f'<div class="static-label">{label}</div>', unsafe_allow_html=True)
-            mission[key] = st.text_area(label, value=mission.get(key, ""), height=150,
+            mission[key] = st.text_area(label, value=mission.get(key, ""), height=68,
                                         key=f"lm_{key}", label_visibility="collapsed")
 
     db.save_life_mission(mission)
+    _inject_textarea_autoresize()
 
 
 # ══════════════════════════════════════════════════════════
