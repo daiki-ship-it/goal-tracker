@@ -915,6 +915,12 @@ if page == "📝 日次記録":
         except ValueError:
             pass
 
+    # 「この日に予定されている仕事」列は常にカレンダーの最新値で同期する。
+    # Streamlit は key が session_state に存在すると value= を無視するため、
+    # 描画前に session_state を明示的に書き換えることで最新カレンダーを反映する。
+    for i, row in enumerate(schedule):
+        st.session_state[f"task_{dk}_{i}"] = gcal_time_slots.get(row["time"], "")
+
     st.markdown("**TIME / この日の予定 / ゴールイメージ / GIVEできる価値**")
 
     updated_schedule = []
