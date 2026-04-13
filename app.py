@@ -915,11 +915,39 @@ if page == "📝 日次記録":
         except ValueError:
             pass
 
-    # 「この日に予定されている仕事」列は常にカレンダーの最新値で同期する。
-    # Streamlit は key が session_state に存在すると value= を無視するため、
-    # 描画前に session_state を明示的に書き換えることで最新カレンダーを反映する。
+    # カレンダー同期ロジック（ユーザー手入力の保護と両立）
+    #
+    # 問題: 毎描画で session_state を無条件に上書きすると、
+    #       ユーザーが入力するたびに Streamlit が再描画し入力が消える。
+    #
+    # 解決策: カレンダーの「前回値」をキャッシュし、変化があった時だけ更新する。
+    #   - 初回ロード         → カレンダー値で初期化（DB保存値より優先）
+    #   - カレンダーが変化   → 現在値 == 前回カレンダー値（手動編集なし）なら更新
+    #   - ユーザーが手動編集 → 現在値 != 前回カレンダー値なので上書きしない
+    cal_cache_key = f"gcal_cache_{dk}"
+    if cal_cache_key not in st.session_state:
+        st.session_state[cal_cache_key] = {}
+    prev_gcal_slots: dict[str, str] = st.session_state[cal_cache_key]
+
     for i, row in enumerate(schedule):
-        st.session_state[f"task_{dk}_{i}"] = gcal_time_slots.get(row["time"], "")
+        task_key = f"task_{dk}_{i}"
+        time_slot = row["time"]
+        new_cal = gcal_time_slots.get(time_slot, "")
+        prev_cal = prev_gcal_slots.get(time_slot)  # None = 未キャッシュ（初回）
+
+        if prev_cal is None:
+            # 初回ロード: カレンダー値優先、なければ DB 保存値
+            st.session_state[task_key] = new_cal or row.get("task", "")
+        elif new_cal != prev_cal:
+            # カレンダーが変化: ユーザーが手動編集していなければ更新
+            current_val = st.session_state.get(task_key, "")
+            if current_val == prev_cal:
+                st.session_state[task_key] = new_cal
+
+    # 次の再描画での変化検知のためにキャッシュを更新
+    st.session_state[cal_cache_key] = {
+        row["time"]: gcal_time_slots.get(row["time"], "") for row in schedule
+    }
 
     st.markdown("**TIME / この日の予定 / ゴールイメージ / GIVEできる価値**")
 
