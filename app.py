@@ -534,6 +534,7 @@ def _inject_textarea_autoresize() -> None:
                 const maxH = Math.max.apply(null, heights);
                 textareas.forEach(function(t) {
                     t.style.overflowY = 'hidden';
+                    t.style.resize = 'none';
                     t.style.height = maxH + 'px';
                 });
             }
@@ -963,23 +964,26 @@ if page == "📝 日次記録":
         with c1:
             st.markdown(f"**{row['time']}**")
         with c2:
-            task = st.text_input(
+            task = st.text_area(
                 "task",
                 key=f"task_{dk}_{i}",
+                height=68,
                 label_visibility="collapsed",
             )
         with c3:
-            goal = st.text_input(
+            goal = st.text_area(
                 "goal",
                 value=row.get("goal_image", ""),
                 key=f"goal_{dk}_{i}",
+                height=68,
                 label_visibility="collapsed",
             )
         with c4:
-            give = st.text_input(
+            give = st.text_area(
                 "give",
                 value=row.get("give_value", ""),
                 key=f"give_{dk}_{i}",
+                height=68,
                 label_visibility="collapsed",
             )
         updated_schedule.append(
@@ -1025,20 +1029,20 @@ if page == "📝 日次記録":
     for i, row in enumerate(actions):
         a1, a2, a3, a4 = st.columns([1, 3, 3, 3])
         with a1:
-            t = st.text_input(
-                "time", value=row.get("time", ""), key=f"at_{dk}_{i}", label_visibility="collapsed"
+            t = st.text_area(
+                "time", value=row.get("time", ""), key=f"at_{dk}_{i}", height=68, label_visibility="collapsed"
             )
         with a2:
-            a = st.text_input(
-                "action", value=row.get("action", ""), key=f"aa_{dk}_{i}", label_visibility="collapsed"
+            a = st.text_area(
+                "action", value=row.get("action", ""), key=f"aa_{dk}_{i}", height=68, label_visibility="collapsed"
             )
         with a3:
-            r = st.text_input(
-                "result", value=row.get("result", ""), key=f"ar_{dk}_{i}", label_visibility="collapsed"
+            r = st.text_area(
+                "result", value=row.get("result", ""), key=f"ar_{dk}_{i}", height=68, label_visibility="collapsed"
             )
         with a4:
-            n = st.text_input(
-                "next", value=row.get("next_learning", ""), key=f"an_{dk}_{i}", label_visibility="collapsed"
+            n = st.text_area(
+                "next", value=row.get("next_learning", ""), key=f"an_{dk}_{i}", height=68, label_visibility="collapsed"
             )
         updated_actions.append({"time": t, "action": a, "result": r, "next_learning": n})
     entry["actions"] = updated_actions
