@@ -488,6 +488,18 @@ st.markdown("""
     font-size: 0.95rem;
     margin: 0.35rem 0 0.5rem 0;
 }
+/* スケジュール→アクション追加ボタン */
+[data-testid="stButton"] button[kind="secondary"]:has(span:contains("＋")) {
+    padding: 2px 6px;
+    font-size: 1rem;
+    line-height: 1;
+    min-height: unset;
+    height: 32px;
+    background: rgba(245, 200, 66, 0.15);
+    border: 1px solid rgba(245, 200, 66, 0.6);
+    color: #f5c842;
+    border-radius: 4px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -953,14 +965,14 @@ if page == "📝 日次記録":
     st.markdown("**TIME / この日の予定 / ゴールイメージ / GIVEできる価値**")
 
     updated_schedule = []
-    h1, h2, h3, h4 = st.columns([1, 3, 3, 2])
+    h1, h2, h3, h4, h5 = st.columns([1, 3, 3, 2, 0.6])
     h1.markdown("**TIME**")
     h2.markdown("**この日に予定されている仕事**")
     h3.markdown("**ゴールイメージ**")
     h4.markdown("**GIVEできる価値**")
 
     for i, row in enumerate(schedule):
-        c1, c2, c3, c4 = st.columns([1, 3, 3, 2])
+        c1, c2, c3, c4, c5 = st.columns([1, 3, 3, 2, 0.6])
         with c1:
             st.markdown(f"**{row['time']}**")
         with c2:
@@ -986,6 +998,14 @@ if page == "📝 日次記録":
                 height=68,
                 label_visibility="collapsed",
             )
+        with c5:
+            if st.button("＋", key=f"add_action_{dk}_{i}", help="今日行うべきアクションに追加"):
+                task_val = st.session_state.get(f"task_{dk}_{i}", "")
+                if task_val.strip():
+                    st.session_state[f"_pending_add_action_{dk}"] = {
+                        "time": row["time"],
+                        "action": task_val,
+                    }
         updated_schedule.append(
             {"time": row["time"], "task": task, "goal_image": goal, "give_value": give}
         )
@@ -1020,6 +1040,24 @@ if page == "📝 日次記録":
 
     actions = entry["actions"]
     updated_actions = []
+
+    # スケジュール欄の＋ボタンで追加リクエストがあれば最初の空きスロットに反映
+    _pending_key = f"_pending_add_action_{dk}"
+    if _pending_key in st.session_state:
+        _pending = st.session_state.pop(_pending_key)
+        _added = False
+        for _j, _arow in enumerate(actions):
+            _cur = st.session_state.get(f"aa_{dk}_{_j}", _arow.get("action", ""))
+            if not _cur.strip():
+                st.session_state[f"aa_{dk}_{_j}"] = _pending["action"]
+                st.session_state[f"at_{dk}_{_j}"] = _pending["time"]
+                _added = True
+                break
+        if _added:
+            st.toast(f"「{_pending['action']}」をアクションに追加しました", icon="✅")
+        else:
+            st.toast("アクション欄に空きがありません", icon="⚠️")
+
     ah1, ah2, ah3, ah4 = st.columns([1, 3, 3, 3])
     ah1.markdown("**TIME**")
     ah2.markdown("**今日行うべきアクション**")
