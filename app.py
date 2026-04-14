@@ -705,7 +705,22 @@ if page == "📝 日次記録":
                 "result": st.session_state.get(f"ar_{dk}_{i}", row.get("result", "")),
                 "next_learning": st.session_state.get(f"an_{dk}_{i}", row.get("next_learning", "")),
             })
-        entry["actions"] = updated_actions
+
+        def _sort_key(row):
+            t = row.get("time", "").strip().replace("：", ":")
+            if not t:
+                return float("inf")
+            try:
+                parts = t.split(":")
+                h = int(parts[0])
+                m = int(parts[1]) if len(parts) > 1 else 0
+                if h == 0:
+                    h = 24
+                return h * 60 + m
+            except Exception:
+                return float("inf")
+
+        entry["actions"] = sorted(updated_actions, key=_sort_key)
 
         for key in [
             "problem", "problem_root", "problem_source", "problem_research_internal",
@@ -1038,34 +1053,76 @@ if page == "📝 日次記録":
     # ──────────────────────────────────────────────────────
     st.markdown('<div class="section-header">■ どのようなアクションがあなたの人生の成功を加速させるか？</div>', unsafe_allow_html=True)
 
-    actions = entry["actions"]
-    updated_actions = []
+    def _action_sort_key(row):
+        t = row.get("time", "").strip().replace("：", ":")
+        if not t:
+            return float("inf")
+        try:
+            parts = t.split(":")
+            h = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 else 0
+            if h == 0:
+                h = 24  # 0:00 は深夜扱い（一日の末尾）
+            return h * 60 + m
+        except Exception:
+            return float("inf")
 
-    # スケジュール欄の＋ボタンで追加リクエストがあれば最初の空きスロットに反映
+    def _collect_actions_from_state(dk, actions):
+        return [
+            {
+                "time": st.session_state.get(f"at_{dk}_{i}", row.get("time", "")),
+                "action": st.session_state.get(f"aa_{dk}_{i}", row.get("action", "")),
+                "result": st.session_state.get(f"ar_{dk}_{i}", row.get("result", "")),
+                "next_learning": st.session_state.get(f"an_{dk}_{i}", row.get("next_learning", "")),
+            }
+            for i, row in enumerate(actions)
+        ]
+
+    def _apply_actions_to_state(dk, sorted_actions, old_count):
+        """描画前専用: session_state にソート済みの値を書き込む。描画後は使用不可。"""
+        for i, row in enumerate(sorted_actions):
+            st.session_state[f"at_{dk}_{i}"] = row["time"]
+            st.session_state[f"aa_{dk}_{i}"] = row["action"]
+            st.session_state[f"ar_{dk}_{i}"] = row["result"]
+            st.session_state[f"an_{dk}_{i}"] = row["next_learning"]
+        for i in range(len(sorted_actions), old_count):
+            for pfx in ["at", "aa", "ar", "an"]:
+                st.session_state.pop(f"{pfx}_{dk}_{i}", None)
+
+    def _clear_action_keys(dk, old_count):
+        """描画後専用: 既存のウィジェットキーを削除して次の rerun で DB 値から再初期化させる。"""
+        for i in range(old_count):
+            for pfx in ["at", "aa", "ar", "an"]:
+                key = f"{pfx}_{dk}_{i}"
+                if key in st.session_state:
+                    del st.session_state[key]
+
+    actions = entry["actions"]
+
+    # スケジュール欄の＋ボタンで追加リクエストがあれば新しい行として追加してソート
     _pending_key = f"_pending_add_action_{dk}"
     if _pending_key in st.session_state:
         _pending = st.session_state.pop(_pending_key)
-        _added = False
-        for _j, _arow in enumerate(actions):
-            _cur = st.session_state.get(f"aa_{dk}_{_j}", _arow.get("action", ""))
-            if not _cur.strip():
-                st.session_state[f"aa_{dk}_{_j}"] = _pending["action"]
-                st.session_state[f"at_{dk}_{_j}"] = _pending["time"]
-                _added = True
-                break
-        if _added:
-            st.toast(f"「{_pending['action']}」をアクションに追加しました", icon="✅")
-        else:
-            st.toast("アクション欄に空きがありません", icon="⚠️")
+        current = _collect_actions_from_state(dk, actions)
+        current.append({"time": _pending["time"], "action": _pending["action"], "result": "", "next_learning": ""})
+        sorted_acts = sorted(current, key=_action_sort_key)
+        _apply_actions_to_state(dk, sorted_acts, len(actions))
+        entry["actions"] = sorted_acts
+        db.save_daily_entry(entry)
+        st.toast(f"「{_pending['action']}」をアクションに追加しました", icon="✅")
+        st.rerun()
 
-    ah1, ah2, ah3, ah4 = st.columns([1, 3, 3, 3])
+    ah1, ah2, ah3, ah4, _ah5 = st.columns([1, 3, 3, 3, 0.5])
     ah1.markdown("**TIME**")
     ah2.markdown("**今日行うべきアクション**")
     ah3.markdown("**結果**")
     ah4.markdown("**次に活かせること（同じ失敗を2度と繰り返さないために）**")
 
+    updated_actions = []
+    delete_action_index = None
+
     for i, row in enumerate(actions):
-        a1, a2, a3, a4 = st.columns([1, 3, 3, 3])
+        a1, a2, a3, a4, a5 = st.columns([1, 3, 3, 3, 0.5])
         with a1:
             t = st.text_area(
                 "time", value=row.get("time", ""), key=f"at_{dk}_{i}", height=68, label_visibility="collapsed"
@@ -1082,8 +1139,28 @@ if page == "📝 日次記録":
             n = st.text_area(
                 "next", value=row.get("next_learning", ""), key=f"an_{dk}_{i}", height=68, label_visibility="collapsed"
             )
+        with a5:
+            if st.button("×", key=f"del_action_{dk}_{i}", help="この行を削除"):
+                delete_action_index = i
         updated_actions.append({"time": t, "action": a, "result": r, "next_learning": n})
-    entry["actions"] = updated_actions
+
+    if delete_action_index is not None:
+        updated_actions.pop(delete_action_index)
+        sorted_acts = sorted(updated_actions, key=_action_sort_key)
+        _clear_action_keys(dk, len(actions))
+        entry["actions"] = sorted_acts
+        db.save_daily_entry(entry)
+        st.rerun()
+
+    if st.button("＋ 行を追加", key=f"add_action_row_{dk}"):
+        updated_actions.append({"time": "", "action": "", "result": "", "next_learning": ""})
+        sorted_acts = sorted(updated_actions, key=_action_sort_key)
+        _clear_action_keys(dk, len(actions))
+        entry["actions"] = sorted_acts
+        db.save_daily_entry(entry)
+        st.rerun()
+
+    entry["actions"] = sorted(updated_actions, key=_action_sort_key)
 
     # ──────────────────────────────────────────────────────
     with st.expander("■ 問題解決 ver（任意）"):
