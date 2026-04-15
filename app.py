@@ -186,9 +186,9 @@ def _cached_fetch_google_events(
     from googleapiclient.errors import HttpError
 
     _ = cred_mtime
-    creds = gcc.get_credentials(interactive=False)
+    creds, auth_err = gcc.get_credentials(interactive=False)
     if creds is None:
-        return [], "Google 認証情報がありません（token.json を確認してください）。"
+        return [], auth_err
     svc = gcc.build_calendar_service(creds)
     try:
         evs, _ = gcc.list_events(svc, calendar_id, time_min_iso, time_max_iso)
@@ -230,9 +230,9 @@ def _cached_fetch_google_tasks(
     from googleapiclient.errors import HttpError
 
     _ = cred_mtime
-    creds = gcc.get_credentials(interactive=False)
+    creds, auth_err = gcc.get_credentials(interactive=False)
     if creds is None:
-        return [], None
+        return [], auth_err
     try:
         tsvc = gcc.build_tasks_service(creds)
         tz = ZoneInfo(tz_name)

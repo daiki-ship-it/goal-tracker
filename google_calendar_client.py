@@ -51,24 +51,35 @@ def _chmod_private(path: str) -> None:
         pass
 
 
-def get_credentials(*, interactive: bool = False) -> Credentials | None:
+_REAUTH_MESSAGE = (
+    "Google トークンが失効しました。ターミナルで次のコマンドを実行して再認証してください:\n"
+    "  python3 google_calendar_client.py"
+)
+
+
+def get_credentials(*, interactive: bool = False) -> tuple[Credentials | None, str | None]:
     """
     credentials.json と token.json から認証情報を返す。
-    interactive=False のとき、有効なトークンがなければ None。
+
+    戻り値: (creds, error_message)
+      - 成功時: (Credentials, None)
+      - 失敗時: (None, エラーメッセージ文字列)
+
+    interactive=False のとき、有効なトークンがなければ (None, メッセージ)。
     interactive=True のとき、トークンがなければローカルサーバで OAuth。
     """
     cred_path = default_credentials_path()
     token_path = default_token_path()
 
     if not os.path.isfile(cred_path):
-        return None
+        return None, "credentials.json が見つかりません。GCP の OAuth クライアント情報を配置してください。"
 
     creds: Credentials | None = None
     if os.path.isfile(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
 
     if creds and creds.valid:
-        return creds
+        return creds, None
 
     if creds and creds.expired and creds.refresh_token:
         try:
@@ -76,14 +87,27 @@ def get_credentials(*, interactive: bool = False) -> Credentials | None:
             with open(token_path, "w", encoding="utf-8") as f:
                 f.write(creds.to_json())
             _chmod_private(token_path)
-            return creds
-        except Exception:
-            if not interactive:
-                return None
+            return creds, None
+        except Exception as e:
+            err_str = str(e)
+            # invalid_grant = リフレッシュトークン失効。古い token.json を削除して
+            # 次回の再認証をスムーズにする。
+            if "invalid_grant" in err_str or "Token has been expired or revoked" in err_str:
+                try:
+                    os.remove(token_path)
+                except OSError:
+                    pass
+                if not interactive:
+                    return None, _REAUTH_MESSAGE
+            else:
+                if not interactive:
+                    return None, f"Google 認証の更新に失敗しました: {err_str[:200]}"
             creds = None
 
     if not interactive:
-        return None
+        if not os.path.isfile(token_path):
+            return None, _REAUTH_MESSAGE
+        return None, "Google 認証情報が無効です。token.json を削除して再認証してください。"
 
     print(
         "OAuth: このあとブラウザが開きます。開かない場合は、次に表示される URL をコピーしてブラウザに貼ってください。",
@@ -94,7 +118,7 @@ def get_credentials(*, interactive: bool = False) -> Credentials | None:
     with open(token_path, "w", encoding="utf-8") as f:
         f.write(creds.to_json())
     _chmod_private(token_path)
-    return creds
+    return creds, None
 
 
 def build_calendar_service(creds: Credentials):
@@ -386,9 +410,9 @@ if __name__ == "__main__":
     if os.path.isfile(default_token_path()):
         print("token.json があります。有効ならそのまま予定を取得します…", flush=True)
 
-    c = get_credentials(interactive=True)
+    c, auth_err = get_credentials(interactive=True)
     if not c:
-        print("認証に失敗しました。credentials.json をプロジェクトルートに置いて再実行してください。")
+        print(f"認証に失敗しました: {auth_err}")
         sys.exit(1)
     svc = build_calendar_service(c)
 
