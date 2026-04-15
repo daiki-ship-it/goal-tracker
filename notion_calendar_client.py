@@ -67,6 +67,72 @@ def _extract_date_prop(page: dict, prop_name: str) -> dict | None:
     return prop.get("date")
 
 
+def _extract_rich_text_prop(page: dict, prop_name: str) -> str | None:
+    """指定名（大文字小文字無視）の rich_text プロパティからプレーンテキストを取得。"""
+    props = page.get("properties", {})
+    prop = props.get(prop_name)
+    if prop is None:
+        for k, v in props.items():
+            if k.lower() == prop_name.lower():
+                prop = v
+                break
+    if prop is None or prop.get("type") != "rich_text":
+        return None
+    texts = prop.get("rich_text", [])
+    result = "".join(t.get("plain_text", "") for t in texts).strip()
+    return result or None
+
+
+def _extract_progress_prop(page: dict, prop_name: str) -> float | None:
+    """指定名（大文字小文字無視）の rollup / formula / number プロパティから
+    0.0〜1.0 の進捗値を取得する。Notion の percent_checked rollup に対応。"""
+    props = page.get("properties", {})
+    prop = props.get(prop_name)
+    if prop is None:
+        for k, v in props.items():
+            if k.lower() == prop_name.lower():
+                prop = v
+                break
+    if prop is None:
+        return None
+    t = prop.get("type")
+    if t == "rollup":
+        rollup = prop.get("rollup", {})
+        rt = rollup.get("type")
+        if rt == "number":
+            val = rollup.get("number")
+            if val is not None:
+                return float(val)
+    elif t == "formula":
+        formula = prop.get("formula", {})
+        ft = formula.get("type")
+        if ft == "number":
+            val = formula.get("number")
+            if val is not None:
+                return float(val)
+    elif t == "number":
+        val = prop.get("number")
+        if val is not None:
+            return float(val)
+    return None
+
+
+def _extract_relation_first_id(page: dict, prop_name: str) -> str | None:
+    """指定名（大文字小文字無視）の relation プロパティの最初のページ ID を返す。
+    Notion のサブアイテム機能では親は 1 件のみ想定。"""
+    props = page.get("properties", {})
+    prop = props.get(prop_name)
+    if prop is None:
+        for k, v in props.items():
+            if k.lower() == prop_name.lower():
+                prop = v
+                break
+    if prop is None or prop.get("type") != "relation":
+        return None
+    relations = prop.get("relation", [])
+    return relations[0].get("id") if relations else None
+
+
 def _normalize_event(page: dict, date_prop: str, source_id: str) -> dict | None:
     """Notion ページをアプリ内イベント形式に変換。"""
     date_val = _extract_date_prop(page, date_prop)
@@ -168,8 +234,16 @@ def fetch_upcoming_tasks(
     status_prop: str | None = None,
     token: str | None = None,
     days_ahead: int = 180,
+    memo_prop: str | None = None,
+    parent_prop: str | None = None,
+    progress_prop: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """タスク DB から date_from 以降（days_ahead 日以内）のタスクを取得。締切日付きで返す。"""
+    """タスク DB から date_from 以降（days_ahead 日以内）のタスクを取得。締切日付きで返す。
+
+    memo_prop:     メモ列のプロパティ名（rich_text 型、例: "メモ"）
+    parent_prop:   親アイテムのプロパティ名（relation 型、例: "親アイテム"）
+    progress_prop: 進捗列のプロパティ名（rollup/formula 型、例: "進捗"）
+    """
     tok = token or get_token()
     if not tok:
         return [], "NOTION_TOKEN が未設定です。"
@@ -182,40 +256,54 @@ def fetch_upcoming_tasks(
             {"property": date_prop, "date": {"before": date_to}},
         ]
     }
-    body: dict[str, Any] = {
+    base_body: dict[str, Any] = {
         "filter": filter_body,
         "page_size": 100,
         "sorts": [{"property": date_prop, "direction": "ascending"}],
     }
-    data, err = _do_post(url, body, tok)
-    if err:
-        return [], err
 
     tasks: list[dict[str, Any]] = []
-    for page in (data or {}).get("results", []):
-        title = _extract_title(page)
-        props = page.get("properties", {})
-        date_val = _extract_date_prop(page, date_prop)
-        deadline_iso = (date_val.get("start") or "")[:10] if date_val else None
-        status = "needsAction"
-        if status_prop:
-            sp = props.get(status_prop)
-            if sp:
-                t = sp.get("type")
-                if t == "checkbox":
-                    status = "completed" if sp.get("checkbox") else "needsAction"
-                elif t == "status":
-                    name = (sp.get("status") or {}).get("name", "").lower()
-                    if name in ("done", "完了", "completed", "closed"):
-                        status = "completed"
-        tasks.append(
-            {
-                "id": page.get("id"),
-                "title": title,
-                "deadline_iso": deadline_iso,
-                "status": status,
-            }
-        )
+    cursor: str | None = None
+
+    while True:
+        body = dict(base_body)
+        if cursor:
+            body["start_cursor"] = cursor
+        data, err = _do_post(url, body, tok)
+        if err:
+            return tasks, err
+        for page in (data or {}).get("results", []):
+            title = _extract_title(page)
+            props = page.get("properties", {})
+            date_val = _extract_date_prop(page, date_prop)
+            deadline_iso = (date_val.get("start") or "")[:10] if date_val else None
+            status = "needsAction"
+            if status_prop:
+                sp = props.get(status_prop)
+                if sp:
+                    t = sp.get("type")
+                    if t == "checkbox":
+                        status = "completed" if sp.get("checkbox") else "needsAction"
+                    elif t == "status":
+                        name = (sp.get("status") or {}).get("name", "").lower()
+                        if name in ("done", "完了", "completed", "closed"):
+                            status = "completed"
+            tasks.append(
+                {
+                    "id": page.get("id"),
+                    "title": title,
+                    "deadline_iso": deadline_iso,
+                    "status": status,
+                    "memo": _extract_rich_text_prop(page, memo_prop) if memo_prop else None,
+                    "parent_id": _extract_relation_first_id(page, parent_prop) if parent_prop else None,
+                    "progress": _extract_progress_prop(page, progress_prop) if progress_prop else None,
+                }
+            )
+        if (data or {}).get("has_more") and (data or {}).get("next_cursor"):
+            cursor = data["next_cursor"]  # type: ignore[index]
+        else:
+            break
+
     return tasks, None
 
 

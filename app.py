@@ -251,13 +251,23 @@ def _cached_fetch_ai_launch_tasks(
     date_prop: str,
     status_prop: str | None,
     token_hash: str,
+    memo_prop: str | None = None,
+    parent_prop: str | None = None,
+    progress_prop: str | None = None,
 ) -> tuple[list[dict], str | None]:
-    """Notion AI ローンチ DB から date_from 以降の全タスクをキャッシュ付きで取得。"""
+    """Notion タスク DB から date_from 以降の全タスクをキャッシュ付きで取得。
+    memo_prop / parent_prop / progress_prop を指定すると各フィールドも含めて返す。"""
     import notion_calendar_client as ncc
 
     _ = token_hash
     return ncc.fetch_upcoming_tasks(
-        database_id, date.fromisoformat(date_from_iso), date_prop, status_prop
+        database_id,
+        date.fromisoformat(date_from_iso),
+        date_prop,
+        status_prop,
+        memo_prop=memo_prop,
+        parent_prop=parent_prop,
+        progress_prop=progress_prop,
     )
 
 
@@ -286,6 +296,143 @@ def _format_tasks_with_deadlines_html(tasks: list[dict]) -> str:
         else:
             parts.append(f"<li style='margin:0.35rem 0'>{date_label}{title}</li>")
     return "<ul style='margin:0;padding-left:1.15rem'>" + "".join(parts) + "</ul>"
+
+
+def _format_tasks_hierarchical_html(tasks: list[dict]) -> str:
+    """タスクリストを親子階層・進捗・メモ付きで HTML 化。
+
+    - 大タスク（parent_id=None または親が範囲外）をトップレベルで表示
+    - 中タスクは左ボーダーつき入れ子リストで表示
+    - 完了タスクは取り消し線 + opacity:0.65
+    - メモは未完了タスクのみ、2行 line-clamp で表示
+    - 親には完了数/全数を小さく表示
+    - 親が範囲外の孤立した子は「（親タスクは表示範囲外）」グループにまとめる
+    """
+    if not tasks:
+        return ""
+
+    all_ids = {t["id"] for t in tasks if t.get("id")}
+
+    # parent_id → 子タスクリスト
+    children_map: dict[str, list[dict]] = {}
+    top_level: list[dict] = []
+    orphans: list[dict] = []
+
+    for t in tasks:
+        pid = t.get("parent_id")
+        if pid:
+            if pid in all_ids:
+                children_map.setdefault(pid, []).append(t)
+            else:
+                orphans.append(t)
+        else:
+            top_level.append(t)
+
+    def _date_label(deadline_iso: str | None) -> str:
+        if not deadline_iso:
+            return ""
+        try:
+            d = date.fromisoformat(deadline_iso)
+            return (
+                f"<span style='opacity:0.65;font-size:0.82rem;"
+                f"margin-right:0.3rem'>{d.month}/{d.day}</span>"
+            )
+        except ValueError:
+            return ""
+
+    def _render_task_li(t: dict, *, is_child: bool = False) -> str:
+        title = html.escape(t.get("title") or "")
+        dl = _date_label(t.get("deadline_iso"))
+        completed = t.get("status") == "completed"
+
+        indent_marker = (
+            "<span style='opacity:0.4;margin-right:0.2rem'>↳</span>" if is_child else ""
+        )
+        font_size = "font-size:0.9rem;" if is_child else "font-weight:600;font-size:0.95rem;"
+        opacity = "opacity:0.65;" if completed else ""
+        title_html = f"<del>{title}</del>" if completed else title
+
+        memo_html = ""
+        if not completed:
+            raw_memo = t.get("memo") or ""
+            if raw_memo:
+                memo_escaped = html.escape(raw_memo)
+                memo_html = (
+                    f"<div style='color:rgba(128,128,128,0.8);font-size:0.78rem;"
+                    f"line-height:1.35;margin-top:0.1rem;padding-left:0.5rem;"
+                    f"display:-webkit-box;-webkit-line-clamp:2;"
+                    f"-webkit-box-orient:vertical;overflow:hidden'>"
+                    f"{memo_escaped}</div>"
+                )
+
+        return (
+            f"<li style='margin:0.2rem 0;{font_size}{opacity}'>"
+            f"{indent_marker}{dl}{title_html}{memo_html}</li>"
+        )
+
+    def _render_parent_with_children(t: dict) -> str:
+        tid = t.get("id", "")
+        kids = sorted(
+            children_map.get(tid, []),
+            key=lambda x: x.get("deadline_iso") or "",
+        )
+
+        # Notion の進捗プロパティをそのまま表示（0.0〜1.0 → 例: 25%）
+        progress_html = ""
+        raw_progress = t.get("progress")
+        if raw_progress is not None:
+            pct = int(round(raw_progress * 100)) if raw_progress <= 1.0 else int(round(raw_progress))
+            progress_html = (
+                f"<span style='opacity:0.55;font-size:0.78rem;"
+                f"margin-left:0.4rem'>{pct}%</span>"
+            )
+
+        title = html.escape(t.get("title") or "")
+        dl = _date_label(t.get("deadline_iso"))
+        completed = t.get("status") == "completed"
+        opacity = "opacity:0.65;" if completed else ""
+        title_html = f"<del>{title}</del>" if completed else title
+
+        parent_li = (
+            f"<li style='margin:0.5rem 0 0.15rem;font-weight:600;"
+            f"font-size:0.95rem;{opacity}'>"
+            f"{dl}{title_html}{progress_html}</li>"
+        )
+
+        if not kids:
+            return parent_li
+
+        child_items = "".join(_render_task_li(k, is_child=True) for k in kids)
+        child_ul = (
+            f"<ul style='list-style:none;padding-left:1rem;margin:0 0 0.4rem;"
+            f"border-left:2px solid rgba(128,128,128,0.2)'>"
+            f"{child_items}</ul>"
+        )
+        return parent_li + child_ul
+
+    parts: list[str] = []
+
+    # トップレベルタスク（子を持つ場合はまとめて描画）
+    top_sorted = sorted(top_level, key=lambda x: x.get("deadline_iso") or "")
+    for t in top_sorted:
+        parts.append(_render_parent_with_children(t))
+
+    # 孤立した子タスク（親が表示範囲外）
+    if orphans:
+        orphans_sorted = sorted(orphans, key=lambda x: x.get("deadline_iso") or "")
+        orphan_items = "".join(_render_task_li(o, is_child=True) for o in orphans_sorted)
+        parts.append(
+            "<li style='margin:0.5rem 0 0.15rem;font-size:0.82rem;opacity:0.5'>"
+            "（親タスクは表示範囲外）</li>"
+            f"<ul style='list-style:none;padding-left:1rem;margin:0 0 0.4rem;"
+            f"border-left:2px solid rgba(128,128,128,0.15)'>{orphan_items}</ul>"
+        )
+
+    return (
+        "<ul style='list-style:none;padding:0;margin:0'>"
+        + "".join(parts)
+        + "</ul>"
+    )
 
 
 def _task_is_google_date_only_due(due: str) -> bool:
@@ -616,9 +763,15 @@ if page == "📝 日次記録":
     ai_launch_db_id = os.environ.get("NOTION_AI_LAUNCH_DATABASE_ID", "").strip()
     ai_launch_date_prop = os.environ.get("NOTION_AI_LAUNCH_DATE_PROPERTY", "締切")
     ai_launch_status_prop = os.environ.get("NOTION_AI_LAUNCH_STATUS_PROPERTY", "").strip() or None
+    ai_launch_memo_prop = os.environ.get("NOTION_AI_LAUNCH_MEMO_PROPERTY", "メモ").strip() or None
+    ai_launch_parent_prop = os.environ.get("NOTION_AI_LAUNCH_PARENT_PROPERTY", "親アイテム").strip() or None
+    ai_launch_progress_prop = os.environ.get("NOTION_AI_LAUNCH_PROGRESS_PROPERTY", "進捗").strip() or None
     tasks_db_id = os.environ.get("NOTION_TASKS_DATABASE_ID", "").strip()
     tasks_date_prop = os.environ.get("NOTION_TASKS_DATE_PROPERTY", "Due")
     tasks_status_prop = os.environ.get("NOTION_TASKS_STATUS_PROPERTY", "").strip() or None
+    tasks_memo_prop = os.environ.get("NOTION_TASKS_MEMO_PROPERTY", "メモ").strip() or None
+    tasks_parent_prop = os.environ.get("NOTION_TASKS_PARENT_PROPERTY", "親アイテム").strip() or None
+    tasks_progress_prop = os.environ.get("NOTION_TASKS_PROGRESS_PROPERTY", "進捗").strip() or None
     notion_token = ncc.get_token()
     token_hash = str(hash(notion_token or ""))
 
@@ -809,7 +962,9 @@ if page == "📝 日次記録":
         ai_launch_err: str | None = None
         if notion_token and ai_launch_db_id:
             ai_launch_tasks, ai_launch_err = _cached_fetch_ai_launch_tasks(
-                ai_launch_db_id, today_local.isoformat(), ai_launch_date_prop, ai_launch_status_prop, token_hash
+                ai_launch_db_id, today_local.isoformat(), ai_launch_date_prop, ai_launch_status_prop, token_hash,
+                memo_prop=ai_launch_memo_prop, parent_prop=ai_launch_parent_prop,
+                progress_prop=ai_launch_progress_prop,
             )
 
         # 個人タスク関連（締切が本日以降の全件）
@@ -817,7 +972,9 @@ if page == "📝 日次記録":
         tasks_err: str | None = None
         if notion_token and tasks_db_id:
             day_tasks, tasks_err = _cached_fetch_ai_launch_tasks(
-                tasks_db_id, today_local.isoformat(), tasks_date_prop, tasks_status_prop, token_hash
+                tasks_db_id, today_local.isoformat(), tasks_date_prop, tasks_status_prop, token_hash,
+                memo_prop=tasks_memo_prop, parent_prop=tasks_parent_prop,
+                progress_prop=tasks_progress_prop,
             )
 
         st.markdown("**予定・タスク**")
@@ -855,7 +1012,7 @@ if page == "📝 日次記録":
         elif not ai_launch_tasks:
             ai_block = "<p style='opacity:0.75;margin:0'>今後の AIローンチタスクはありません。</p>"
         else:
-            ai_block = _format_tasks_with_deadlines_html(ai_launch_tasks)
+            ai_block = _format_tasks_hierarchical_html(ai_launch_tasks)
 
         # 個人タスク関連
         if not notion_token or not tasks_db_id:
@@ -870,7 +1027,7 @@ if page == "📝 日次記録":
                 "<p style='opacity:0.75;margin:0'>今後の個人タスクはありません。</p>"
             )
         else:
-            personal_block = _format_tasks_with_deadlines_html(day_tasks)
+            personal_block = _format_tasks_hierarchical_html(day_tasks)
 
         inner = (
             "<p style='margin:0 0 0.4rem 0;font-weight:600;opacity:0.95'>予定（カレンダー）</p>"
