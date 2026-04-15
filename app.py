@@ -660,10 +660,14 @@ def _inject_textarea_autoresize() -> None:
             const doc = window.parent.document;
             const win = window.parent;
 
-            // 以前のインターバルをクリアして蓄積を防ぐ
+            // 以前のタイマー・オブザーバーをクリアして蓄積を防ぐ
             if (win._gt_ar_timer != null) {
                 win.clearInterval(win._gt_ar_timer);
                 win._gt_ar_timer = null;
+            }
+            if (win._gt_ar_obs != null) {
+                win._gt_ar_obs.disconnect();
+                win._gt_ar_obs = null;
             }
 
             function getRowTextareas(el) {
@@ -671,28 +675,28 @@ def _inject_textarea_autoresize() -> None:
                 return row ? Array.from(row.querySelectorAll('textarea')) : [el];
             }
 
+            // テキストエリアの自然な高さを計測（height=0px にして scrollHeight を読む）
+            // JS内の連続した DOM 変更はブラウザが1フレームにまとめるため視覚的ちらつきは発生しない
+            function measureHeight(t) {
+                const savedH = t.style.height;
+                const savedOF = t.style.overflow;
+                t.style.overflow = 'hidden';
+                t.style.height = '0px';
+                const h = Math.max(t.scrollHeight, 48);
+                t.style.height = savedH;
+                t.style.overflow = savedOF;
+                return h;
+            }
+
             function resizeRow(trigger) {
                 const textareas = getRowTextareas(trigger);
-                const activeEl = doc.activeElement;
+                if (!textareas.length) return;
 
-                // 各テキストエリアの必要な高さを計測（フォーカス中は0pxにしない）
-                const heights = textareas.map(function(t) {
-                    if (t === activeEl) {
-                        // フォーカス中はscrollHeightをそのまま使用
-                        return Math.max(t.scrollHeight, 48);
-                    } else {
-                        const prev = t.style.height;
-                        t.style.overflowY = 'hidden';
-                        t.style.height = '0px';
-                        const h = Math.max(t.scrollHeight, 48);
-                        t.style.height = prev;
-                        return h;
-                    }
-                });
-
+                // 全テキストエリアの高さを計測し、行の最大値に揃える
+                const heights = textareas.map(measureHeight);
                 const maxH = Math.max.apply(null, heights);
                 textareas.forEach(function(t) {
-                    t.style.overflowY = 'hidden';
+                    t.style.overflow = 'hidden';
                     t.style.resize = 'none';
                     t.style.height = maxH + 'px';
                 });
@@ -707,9 +711,26 @@ def _inject_textarea_autoresize() -> None:
                 });
             }
 
+            // MutationObserver で Streamlit 再レンダリング後のテキストエリア追加を即座に検知
+            win._gt_ar_obs = new MutationObserver(function(mutations) {
+                var needSetup = false;
+                mutations.forEach(function(m) {
+                    m.addedNodes.forEach(function(n) {
+                        if (n.nodeType === 1 && (
+                            n.tagName === 'TEXTAREA' ||
+                            (n.querySelector && n.querySelector('textarea'))
+                        )) {
+                            needSetup = true;
+                        }
+                    });
+                });
+                if (needSetup) setup();
+            });
+            win._gt_ar_obs.observe(doc.body, { childList: true, subtree: true });
+
             setup();
-            // 親ウィンドウのsetIntervalに保存して蓄積を防ぐ
-            win._gt_ar_timer = win.setInterval(setup, 500);
+            // フォールバック: MutationObserver が拾いきれないケースに備えてポーリング
+            win._gt_ar_timer = win.setInterval(setup, 1000);
         })();
         </script>
         """,
