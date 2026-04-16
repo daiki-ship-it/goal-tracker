@@ -757,6 +757,127 @@ def fmt_date(d: str) -> str:
         return d
 
 
+def _time_sort_key(row: dict) -> float:
+    t = row.get("time", "").strip().replace("：", ":")
+    if not t:
+        return float("inf")
+    try:
+        parts = t.split(":")
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 else 0
+        if h == 0:
+            h = 24
+        return h * 60 + m
+    except Exception:
+        return float("inf")
+
+
+def _save_daily_for_date(dk: str) -> None:
+    """session_state から指定日の日次記録を読み取って SQLite に保存する。
+    ページ切り替え時など、日次記録ブロックが実行されないケースに対応。"""
+    try:
+        entry = db.get_daily_entry(dk)
+
+        schedule_rows = entry.get("schedule", [])
+        updated_schedule = []
+        for i, row in enumerate(schedule_rows):
+            updated_schedule.append({
+                "time": row["time"],
+                "task": st.session_state.get(f"task_{dk}_{i}", row.get("task", "")),
+                "goal_image": st.session_state.get(f"goal_{dk}_{i}", row.get("goal_image", "")),
+                "give_value": st.session_state.get(f"give_{dk}_{i}", row.get("give_value", "")),
+            })
+        entry["schedule"] = updated_schedule
+
+        for img_key in ["image_q1", "image_q2", "image_q3", "image_q4", "image_q5", "image_q6"]:
+            sk = f"img_{dk}_{img_key}"
+            if sk in st.session_state:
+                entry[img_key] = st.session_state[sk]
+
+        actions_rows = entry.get("actions", [])
+        updated_actions = []
+        for i, row in enumerate(actions_rows):
+            updated_actions.append({
+                "time": st.session_state.get(f"at_{dk}_{i}", row.get("time", "")),
+                "action": st.session_state.get(f"aa_{dk}_{i}", row.get("action", "")),
+                "result": st.session_state.get(f"ar_{dk}_{i}", row.get("result", "")),
+                "next_learning": st.session_state.get(f"an_{dk}_{i}", row.get("next_learning", "")),
+            })
+        entry["actions"] = sorted(updated_actions, key=_time_sort_key)
+
+        for prob_key in [
+            "problem", "problem_root", "problem_source", "problem_research_internal",
+            "problem_solution", "problem_research_same", "problem_absolute",
+            "problem_research_other", "problem_principle", "problem_premise",
+            "problem_blind_spot", "problem_prevention",
+        ]:
+            sk = f"prob_{dk}_{prob_key}"
+            if sk in st.session_state:
+                entry[prob_key] = st.session_state[sk]
+
+        if f"msg_{dk}" in st.session_state:
+            entry["message"] = st.session_state[f"msg_{dk}"]
+
+        db.save_daily_entry(entry)
+    except Exception:
+        pass
+
+
+def _save_life_mission_for_session() -> None:
+    """session_state の lm_* キーからライフミッションを SQLite に保存する。
+    ページ切り替え時など、ライフミッションブロックが実行されないケースに対応。"""
+    try:
+        mission = db.get_life_mission()
+        for lm_key in [
+            "mission", "legacy", "values", "assets_now", "assets_at_60", "assets_this_year",
+            "work_purpose", "goal_5years", "goal_1year", "goal_1year_why",
+            "goal_1year_who", "goal_1year_without",
+        ]:
+            sk = f"lm_{lm_key}"
+            if sk in st.session_state:
+                mission[lm_key] = st.session_state[sk]
+        db.save_life_mission(mission)
+    except Exception:
+        pass
+
+
+def _save_quarterly_for_session() -> None:
+    """session_state の q_* / ktype_* / m*g_* / m*r_* キーから四半期目標を SQLite に保存する。
+    ページ切り替え時など、四半期目標ブロックが実行されないケースに対応。"""
+    try:
+        year = st.session_state.get("q_year_sel")
+        quarter = st.session_state.get("q_quarter_sel")
+        if year is None or quarter is None:
+            return
+        year = int(year)
+        quarter = int(quarter)
+
+        goals = db.get_quarterly_goals(year, quarter)
+        for field in ["intention", "month1_theme", "month2_theme", "month3_theme", "kpi_memo"]:
+            sk = f"q_{field}"
+            if sk in st.session_state:
+                goals[field] = st.session_state[sk]
+
+        kpi_rows = db.get_quarterly_kpi(year, quarter)
+        updated_kpi = []
+        for i, row in enumerate(kpi_rows):
+            updated_kpi.append({
+                "type": st.session_state.get(f"ktype_{i}", row.get("type", "KPI")),
+                "label": row.get("label", ""),
+                "month1_goal":   st.session_state.get(f"m1g_{i}", row.get("month1_goal", "")),
+                "month1_result": st.session_state.get(f"m1r_{i}", row.get("month1_result", "")),
+                "month2_goal":   st.session_state.get(f"m2g_{i}", row.get("month2_goal", "")),
+                "month2_result": st.session_state.get(f"m2r_{i}", row.get("month2_result", "")),
+                "month3_goal":   st.session_state.get(f"m3g_{i}", row.get("month3_goal", "")),
+                "month3_result": st.session_state.get(f"m3r_{i}", row.get("month3_result", "")),
+            })
+
+        db.save_quarterly_goals(year, quarter, goals)
+        db.save_quarterly_kpi(year, quarter, updated_kpi)
+    except Exception:
+        pass
+
+
 # ─── サイドバー ────────────────────────────────────────────
 with st.sidebar:
     st.markdown("# 🎯 Success Planning")
@@ -771,6 +892,21 @@ with st.sidebar:
     st.caption(f"記録日数: {len(all_dates)} 日")
     if all_dates:
         st.caption(f"最終記録: {all_dates[0]}")
+
+
+# ─── ページ切り替え検知：前ページのデータを自動保存 ─────────────
+_prev_page = st.session_state.get("_current_page")
+if _prev_page is not None and _prev_page != page:
+    if _prev_page == "📝 日次記録":
+        _dk_prev = st.session_state.get("daily_date_input")
+        if _dk_prev is not None:
+            _dk_str = _dk_prev.isoformat() if hasattr(_dk_prev, "isoformat") else str(_dk_prev)
+            _save_daily_for_date(_dk_str)
+    elif _prev_page == "🏆 ライフミッション":
+        _save_life_mission_for_session()
+    elif _prev_page == "📊 四半期目標":
+        _save_quarterly_for_session()
+st.session_state["_current_page"] = page
 
 
 # ══════════════════════════════════════════════════════════
@@ -847,69 +983,9 @@ if page == "📝 日次記録":
     selected_date = st.session_state["daily_date_input"]
     today_local = datetime.now(cal_tz).date()
 
-    # entryを早期に読み込む（ナビゲーション前の保存コールバックで使用するため）
+    # entryを読み込む
     dk = st.session_state["daily_date_input"].isoformat()
     entry = db.get_daily_entry(dk)
-
-    def _save_from_session() -> None:
-        """ナビゲーション前にsession_stateから現在の入力値を読み取ってDBに保存する。"""
-        schedule_rows = entry.get("schedule", [])
-        actions_rows = entry.get("actions", [])
-
-        updated_schedule = []
-        for i, row in enumerate(schedule_rows):
-            updated_schedule.append({
-                "time": row["time"],
-                "task": st.session_state.get(f"task_{dk}_{i}", row.get("task", "")),
-                "goal_image": st.session_state.get(f"goal_{dk}_{i}", row.get("goal_image", "")),
-                "give_value": st.session_state.get(f"give_{dk}_{i}", row.get("give_value", "")),
-            })
-        entry["schedule"] = updated_schedule
-
-        for key in ["image_q1", "image_q2", "image_q3", "image_q4", "image_q5", "image_q6"]:
-            sk = f"img_{dk}_{key}"
-            if sk in st.session_state:
-                entry[key] = st.session_state[sk]
-
-        updated_actions = []
-        for i, row in enumerate(actions_rows):
-            updated_actions.append({
-                "time": st.session_state.get(f"at_{dk}_{i}", row.get("time", "")),
-                "action": st.session_state.get(f"aa_{dk}_{i}", row.get("action", "")),
-                "result": st.session_state.get(f"ar_{dk}_{i}", row.get("result", "")),
-                "next_learning": st.session_state.get(f"an_{dk}_{i}", row.get("next_learning", "")),
-            })
-
-        def _sort_key(row):
-            t = row.get("time", "").strip().replace("：", ":")
-            if not t:
-                return float("inf")
-            try:
-                parts = t.split(":")
-                h = int(parts[0])
-                m = int(parts[1]) if len(parts) > 1 else 0
-                if h == 0:
-                    h = 24
-                return h * 60 + m
-            except Exception:
-                return float("inf")
-
-        entry["actions"] = sorted(updated_actions, key=_sort_key)
-
-        for key in [
-            "problem", "problem_root", "problem_source", "problem_research_internal",
-            "problem_solution", "problem_research_same", "problem_absolute",
-            "problem_research_other", "problem_principle", "problem_premise",
-            "problem_blind_spot", "problem_prevention",
-        ]:
-            sk = f"prob_{dk}_{key}"
-            if sk in st.session_state:
-                entry[key] = st.session_state[sk]
-
-        if f"msg_{dk}" in st.session_state:
-            entry["message"] = st.session_state[f"msg_{dk}"]
-
-        db.save_daily_entry(entry)
 
     st.title(f"📝 {fmt_date(selected_date.isoformat())}")
     if selected_date != today_local:
@@ -925,7 +1001,7 @@ if page == "📝 日次記録":
         nav1, nav2, nav3 = st.columns([1, 2.2, 1])
         with nav1:
             if st.button("◀", help="前の月（表示のみ）", key="cal_nav_prev"):
-                _save_from_session()
+                _save_daily_for_date(dk)
                 if cm == 1:
                     st.session_state["cal_view_y"] = cy - 1
                     st.session_state["cal_view_m"] = 12
@@ -934,7 +1010,7 @@ if page == "📝 日次記録":
                 st.rerun()
         with nav3:
             if st.button("▶", help="次の月（表示のみ）", key="cal_nav_next"):
-                _save_from_session()
+                _save_daily_for_date(dk)
                 if cm == 12:
                     st.session_state["cal_view_y"] = cy + 1
                     st.session_state["cal_view_m"] = 1
@@ -957,7 +1033,7 @@ if page == "📝 日次記録":
             )
             month_events = _sort_events_by_start(gcal_evs)
 
-        _render_month_day_grid(cy, cm, selected_date, today_local, on_nav=_save_from_session)
+        _render_month_day_grid(cy, cm, selected_date, today_local, on_nav=lambda: _save_daily_for_date(dk))
 
         with st.expander("日付を直接指定", expanded=False):
             st.date_input(
@@ -1477,10 +1553,12 @@ elif page == "📊 四半期目標":
     year_now, q_now = current_quarter(date.today())
     col1, col2 = st.columns(2)
     with col1:
-        year = st.number_input("年", value=year_now, min_value=2020, max_value=2030, step=1)
+        year = st.number_input("年", value=year_now, min_value=2020, max_value=2030, step=1,
+                               key="q_year_sel")
     with col2:
         quarter = st.selectbox("四半期", [1, 2, 3, 4], index=q_now - 1,
-                               format_func=lambda q: f"Q{q} ({(q-1)*3+1}〜{(q-1)*3+3}月)")
+                               format_func=lambda q: f"Q{q} ({(q-1)*3+1}〜{(q-1)*3+3}月)",
+                               key="q_quarter_sel")
 
     months = quarter_months(year, quarter)
     goals = db.get_quarterly_goals(year, quarter)
@@ -1489,7 +1567,8 @@ elif page == "📊 四半期目標":
 
     goals["intention"] = st.text_area(
         "この四半期、何を意図して仕事をするか？",
-        value=goals.get("intention", ""), height=68
+        value=goals.get("intention", ""), height=68,
+        key="q_intention",
     )
 
     _spacer, c1, c2, c3, _trail = st.columns([2, 4, 4, 4, 0.5])
@@ -1498,7 +1577,8 @@ elif page == "📊 四半期目標":
             key = f"month{i+1}_theme"
             goals[key] = st.text_area(
                 f"{month}月：この月、何を意図すると価値があるか？",
-                value=goals.get(key, ""), height=68
+                value=goals.get(key, ""), height=68,
+                key=f"q_{key}",
             )
 
     # KGI/KPI テーブル
@@ -1558,6 +1638,7 @@ elif page == "📊 四半期目標":
         "📝 メモ（KGI/KPIを設定した理由・達成に向けたアクションアイデアなど）",
         value=goals.get("kpi_memo", ""),
         height=150,
+        key="q_kpi_memo",
         placeholder="例）なぜこのKGI/KPIを設定したか、達成するために必要な工夫や具体的なアクションを書いておきましょう。",
     )
 
