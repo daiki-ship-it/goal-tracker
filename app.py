@@ -23,6 +23,44 @@ def _env_flag_true(name: str, *, default: str = "0") -> bool:
         v = default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
+
+def _notion_web_url(database_id: str | None, url_override: str | None) -> str | None:
+    """連携先 Notion DB をブラウザで開く URL。url_override（http/https）があれば優先。"""
+    o = (url_override or "").strip()
+    if o.startswith(("http://", "https://")):
+        return o
+    d = (database_id or "").strip()
+    if not d:
+        return None
+    hex_id = d.replace("-", "").strip()
+    if len(hex_id) != 32:
+        return None
+    try:
+        int(hex_id, 16)
+    except ValueError:
+        return None
+    return f"https://www.notion.so/{hex_id}"
+
+
+def _notion_section_header_row_html(title: str, notion_url: str | None, *, margin_top: str) -> str:
+    """予定・タスクパネル内の小見出し行（任意で Notion リンク）。"""
+    title_esc = html.escape(title)
+    if not notion_url:
+        return (
+            f"<p style='margin:{margin_top} 0 0.4rem 0;font-weight:600;opacity:0.95'>{title_esc}</p>"
+        )
+    u = html.escape(notion_url, quote=True)
+    return (
+        f'<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;'
+        f"gap:0.35rem;margin:{margin_top} 0 0.4rem 0\">"
+        f'<span style="font-weight:600;opacity:0.95">{title_esc}</span>'
+        f'<a href="{u}" target="_blank" rel="noopener noreferrer" '
+        'style="display:inline-block;font-size:0.78rem;font-weight:600;text-decoration:none;'
+        "padding:0.2rem 0.55rem;border-radius:6px;border:1px solid rgba(255,255,255,0.28);"
+        'color:inherit;opacity:0.95">Notionで開く</a>'
+        f"</div>"
+    )
+
 @st.cache_data(ttl=60)
 def _cached_fetch_notion_events(
     database_id: str,
@@ -923,7 +961,9 @@ if page == "📝 日次記録":
     ai_launch_memo_prop = os.environ.get("NOTION_AI_LAUNCH_MEMO_PROPERTY", "メモ").strip() or None
     ai_launch_parent_prop = os.environ.get("NOTION_AI_LAUNCH_PARENT_PROPERTY", "親アイテム").strip() or None
     ai_launch_progress_prop = os.environ.get("NOTION_AI_LAUNCH_PROGRESS_PROPERTY", "進捗").strip() or None
+    ai_launch_web_url_override = os.environ.get("NOTION_AI_LAUNCH_WEB_URL", "").strip() or None
     tasks_db_id = os.environ.get("NOTION_TASKS_DATABASE_ID", "").strip()
+    tasks_web_url_override = os.environ.get("NOTION_TASKS_WEB_URL", "").strip() or None
     tasks_date_prop = os.environ.get("NOTION_TASKS_DATE_PROPERTY", "Due")
     tasks_status_prop = os.environ.get("NOTION_TASKS_STATUS_PROPERTY", "").strip() or None
     tasks_memo_prop = os.environ.get("NOTION_TASKS_MEMO_PROPERTY", "メモ").strip() or None
@@ -931,6 +971,8 @@ if page == "📝 日次記録":
     tasks_progress_prop = os.environ.get("NOTION_TASKS_PROGRESS_PROPERTY", "進捗").strip() or None
     notion_token = ncc.get_token()
     token_hash = str(hash(notion_token or ""))
+    ai_launch_notion_url = _notion_web_url(ai_launch_db_id or None, ai_launch_web_url_override)
+    tasks_notion_url = _notion_web_url(tasks_db_id or None, tasks_web_url_override)
 
     import google_calendar_client as gcc
     gcal_tz_name = os.environ.get("GOOGLE_CALENDAR_TZ", "Asia/Tokyo")
@@ -1129,9 +1171,9 @@ if page == "📝 日次記録":
         inner = (
             "<p style='margin:0 0 0.4rem 0;font-weight:600;opacity:0.95'>予定（カレンダー）</p>"
             + cal_block
-            + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>AIローンチ関連</p>"
+            + _notion_section_header_row_html("AIローンチ関連", ai_launch_notion_url, margin_top="1rem")
             + ai_block
-            + "<p style='margin:1rem 0 0.4rem 0;font-weight:600;opacity:0.95'>個人タスク関連</p>"
+            + _notion_section_header_row_html("個人タスク関連", tasks_notion_url, margin_top="1rem")
             + personal_block
         )
 
