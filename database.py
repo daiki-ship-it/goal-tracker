@@ -77,7 +77,34 @@ def init_db():
         );
     """)
     conn.commit()
+    _ensure_daily_entries_migrations(conn)
     conn.close()
+
+
+def _ensure_daily_entries_migrations(conn):
+    """既存 DB への軽量マイグレーション（カラム追加など）。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_entries)")}
+    if "gcal_slot_snapshot" not in cols:
+        conn.execute("ALTER TABLE daily_entries ADD COLUMN gcal_slot_snapshot TEXT")
+        conn.commit()
+    if "gcal_slot_event_snapshot" not in cols:
+        conn.execute("ALTER TABLE daily_entries ADD COLUMN gcal_slot_event_snapshot TEXT")
+        conn.commit()
+
+
+def _parse_gcal_slot_snapshot(raw) -> dict:
+    """gcal_slot_snapshot カラム（JSON）を {time_slot: summary} に正規化。"""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return {str(k): str(v or "") for k, v in raw.items()}
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict):
+            return {str(k): str(v or "") for k, v in d.items()}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {}
 
 
 # ─── ライフミッション ───────────────────────────────────────
@@ -186,6 +213,8 @@ def get_daily_entry(date_str: str) -> dict:
         d = dict(row)
         d["schedule"] = _migrate_schedule(json.loads(d["schedule"])) if d.get("schedule") else _default_schedule()
         d["actions"] = json.loads(d["actions"]) if d.get("actions") else _default_actions()
+        d["gcal_slot_snapshot"] = _parse_gcal_slot_snapshot(d.get("gcal_slot_snapshot"))
+        d["gcal_slot_event_snapshot"] = _parse_gcal_slot_snapshot(d.get("gcal_slot_event_snapshot"))
         return d
     return _empty_entry(date_str)
 
@@ -237,6 +266,8 @@ def _empty_entry(date_str: str) -> dict:
         "problem_research_same": "", "problem_research_other": "",
         "problem_premise": "", "problem_prevention": "",
         "message": "",
+        "gcal_slot_snapshot": {},
+        "gcal_slot_event_snapshot": {},
         "created_at": None, "updated_at": None,
     }
 
@@ -251,6 +282,8 @@ def save_daily_entry(entry: dict):
 
     schedule_json = json.dumps(entry.get("schedule", []), ensure_ascii=False)
     actions_json = json.dumps(entry.get("actions", []), ensure_ascii=False)
+    gcal_snap_json = json.dumps(entry.get("gcal_slot_snapshot") or {}, ensure_ascii=False)
+    gcal_ev_snap_json = json.dumps(entry.get("gcal_slot_event_snapshot") or {}, ensure_ascii=False)
 
     conn.execute(
         """INSERT OR REPLACE INTO daily_entries
@@ -258,8 +291,9 @@ def save_daily_entry(entry: dict):
             actions, problem, problem_source, problem_solution, problem_absolute,
             problem_principle, problem_blind_spot, problem_root, problem_research_internal,
             problem_research_same, problem_research_other, problem_premise,
-            problem_prevention, message, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            problem_prevention, message, gcal_slot_snapshot, gcal_slot_event_snapshot,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (entry["date"], schedule_json,
          entry.get("image_q1",""), entry.get("image_q2",""),
          entry.get("image_q3",""), entry.get("image_q4",""),
@@ -271,7 +305,7 @@ def save_daily_entry(entry: dict):
          entry.get("problem_root",""), entry.get("problem_research_internal",""),
          entry.get("problem_research_same",""), entry.get("problem_research_other",""),
          entry.get("problem_premise",""), entry.get("problem_prevention",""),
-         entry.get("message",""), created_at, now),
+         entry.get("message",""), gcal_snap_json, gcal_ev_snap_json, created_at, now),
     )
     conn.commit()
     conn.close()

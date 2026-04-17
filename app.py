@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import html
 import os
+import unicodedata
 from datetime import datetime, date, timedelta, timezone
 
 import pandas as pd
@@ -810,6 +811,92 @@ def _time_sort_key(row: dict) -> float:
         return float("inf")
 
 
+def _gcal_text_normalize(s: str) -> str:
+    """カレンダー予定タイトル比較用（空白・全角半角の差で削除判定が外れないようにする）。"""
+    if not s or not isinstance(s, str):
+        return ""
+    t = unicodedata.normalize("NFKC", s.strip())
+    return " ".join(t.split())
+
+
+def _gcal_text_same(a: str, b: str) -> bool:
+    return _gcal_text_normalize(a) == _gcal_text_normalize(b)
+
+
+def _gcal_event_instance_key(ev: dict) -> str:
+    """Google カレンダーイベントのこのインスタンスを一意に指すキー（スロット追跡用）。"""
+    eid = (ev.get("id") or "").strip()
+    cid = (ev.get("calendar_id") or "").strip()
+    if eid:
+        return f"{cid}:{eid}"
+    iu = (ev.get("iCalUID") or "").strip()
+    return f"ical:{iu}" if iu else ""
+
+
+def _gcal_stale_same_title_other_slot(
+    time_slot: str,
+    task_text: str,
+    gcal_time_slots: dict[str, str],
+) -> bool:
+    """このスロットには予定がないが、同じタイトルが別の（予定のある）スロットにだけある → 旧スロットの残骸とみなす。"""
+    if not task_text or time_slot in gcal_time_slots:
+        return False
+    tnorm = _gcal_text_normalize(task_text)
+    if not tnorm:
+        return False
+    for s, title in gcal_time_slots.items():
+        if s == time_slot:
+            continue
+        if _gcal_text_normalize(title) == tnorm:
+            return True
+    return False
+
+
+def _attach_pending_gcal_snapshot(dk: str, entry: dict) -> None:
+    """日次ページで直近計算した Google カレンダー各スロットの値をエントリに付与（保存時に永続化）。"""
+    snap = st.session_state.get(f"_gcal_snap_pending_{dk}")
+    if snap is None:
+        return
+    snap = dict(snap or {})
+    esnap_raw = st.session_state.get(f"_gcal_event_snap_pending_{dk}")
+    esnap: dict[str, str] | None = dict(esnap_raw) if esnap_raw is not None else None
+
+    prev_snap = entry.get("gcal_slot_snapshot") or {}
+    prev_e = entry.get("gcal_slot_event_snapshot") or {}
+    ed = entry.get("date", dk)
+
+    merged_snap: dict[str, str] = {}
+    merged_e: dict[str, str] = {}
+
+    for i, row in enumerate(entry.get("schedule", [])):
+        slot = row["time"]
+        task = st.session_state.get(f"task_{ed}_{i}", row.get("task", ""))
+        api_summ = snap.get(slot, "")
+        api_eid = (esnap or {}).get(slot, "") if esnap is not None else ""
+        if api_summ or api_eid:
+            if api_summ and not _gcal_text_same(task, api_summ):
+                merged_snap[slot] = ""
+                if esnap is not None:
+                    merged_e[slot] = ""
+            else:
+                merged_snap[slot] = api_summ
+                if esnap is not None:
+                    merged_e[slot] = api_eid
+            continue
+        if task and prev_e.get(slot) and _gcal_text_same(task, prev_snap.get(slot, "")):
+            merged_snap[slot] = prev_snap.get(slot, "")
+            if esnap is not None:
+                merged_e[slot] = prev_e.get(slot, "")
+        else:
+            merged_snap[slot] = ""
+            if esnap is not None:
+                merged_e[slot] = ""
+
+    entry["gcal_slot_snapshot"] = merged_snap
+    if esnap is not None:
+        entry["gcal_slot_event_snapshot"] = merged_e
+
+
 def _save_daily_for_date(dk: str) -> None:
     """session_state から指定日の日次記録を読み取って SQLite に保存する。
     ページ切り替え時など、日次記録ブロックが実行されないケースに対応。"""
@@ -856,6 +943,7 @@ def _save_daily_for_date(dk: str) -> None:
         if f"msg_{dk}" in st.session_state:
             entry["message"] = st.session_state[f"msg_{dk}"]
 
+        _attach_pending_gcal_snapshot(dk, entry)
         db.save_daily_entry(entry)
     except Exception:
         pass
@@ -1196,15 +1284,26 @@ if page == "📝 日次記録":
         )
 
     day_label = "今日" if selected_date == today_local else "この日"
-    st.markdown(
-        f'<div class="section-header">■ {day_label}の仕事は何か？（手入力・Google 予定とは別）</div>',
-        unsafe_allow_html=True,
-    )
+    hdr1, hdr2 = st.columns([4.2, 1.2])
+    with hdr1:
+        st.markdown(
+            f'<div class="section-header">■ {day_label}の仕事は何か？（手入力・Google 予定とは別）</div>',
+            unsafe_allow_html=True,
+        )
+    with hdr2:
+        if gcal_configured and st.button(
+            "予定を最新取得",
+            key=f"gcal_refresh_{dk}",
+            help="Google カレンダーのキャッシュを捨てて再取得し、タスク欄の同期もやり直します",
+        ):
+            _cached_fetch_google_events.clear()
+            st.rerun()
 
     schedule = entry["schedule"]
 
     # Google Calendar の時間帯イベントをスロットにマッピング（開始〜終了前まで全スロットに自動反映）
     gcal_time_slots: dict[str, str] = {}
+    gcal_event_slots: dict[str, str] = {}
     for ev in day_evs:
         if ev.get("all_day"):
             continue
@@ -1234,10 +1333,24 @@ if page == "📝 日次記録":
             while current < dt_end_local:
                 slot = f"{current.hour}:{current.minute:02d}"
                 if slot not in gcal_time_slots:
-                    gcal_time_slots[slot] = ev.get("summary", "")
+                    gcal_time_slots[slot] = _gcal_text_normalize(ev.get("summary", "") or "")
+                    ek = _gcal_event_instance_key(ev)
+                    if ek:
+                        gcal_event_slots[slot] = ek
                 current += timedelta(minutes=30)
         except ValueError:
             pass
+
+    # 保存時に永続化する「直近の Google カレンダー各スロット」（予定削除の判定に使用）
+    st.session_state[f"_gcal_snap_pending_{dk}"] = {
+        row["time"]: gcal_time_slots.get(row["time"], "") for row in schedule
+    }
+    if gcal_configured:
+        st.session_state[f"_gcal_event_snap_pending_{dk}"] = {
+            row["time"]: gcal_event_slots.get(row["time"], "") for row in schedule
+        }
+    elif f"_gcal_event_snap_pending_{dk}" in st.session_state:
+        del st.session_state[f"_gcal_event_snap_pending_{dk}"]
 
     # カレンダー同期ロジック（ユーザー手入力の保護と両立）
     #
@@ -1245,9 +1358,15 @@ if page == "📝 日次記録":
     #       ユーザーが入力するたびに Streamlit が再描画し入力が消える。
     #
     # 解決策: カレンダーの「前回値」をキャッシュし、変化があった時だけ更新する。
-    #   - 初回ロード         → カレンダー値で初期化（DB保存値より優先）
+    #   - 初回ロード         → カレンダー値で初期化。カレンダー空のときは DB のうち
+    #                         「前回保存時のカレンダー表示と一致する」セルのみ空にして
+    #                         自動同期の残骸を除去（手入力のみのセルは gcal_slot_snapshot と
+    #                         一致しないため残す）
     #   - カレンダーが変化   → 現在値 == 前回カレンダー値（手動編集なし）なら更新
     #   - ユーザーが手動編集 → 現在値 != 前回カレンダー値なので上書きしない
+    saved_gcal_snap: dict[str, str] = entry.get("gcal_slot_snapshot") or {}
+    saved_event_snap: dict[str, str] = entry.get("gcal_slot_event_snapshot") or {}
+
     cal_cache_key = f"gcal_cache_{dk}"
     if cal_cache_key not in st.session_state:
         st.session_state[cal_cache_key] = {}
@@ -1257,16 +1376,51 @@ if page == "📝 日次記録":
         task_key = f"task_{dk}_{i}"
         time_slot = row["time"]
         new_cal = gcal_time_slots.get(time_slot, "")
+        slot_claimed = time_slot in gcal_time_slots
         prev_cal = prev_gcal_slots.get(time_slot)  # None = 未キャッシュ（初回）
 
         if prev_cal is None:
-            # 初回ロード: カレンダー値優先、なければ DB 保存値
-            st.session_state[task_key] = new_cal or row.get("task", "")
-        elif new_cal != prev_cal:
+            db_task = row.get("task", "")
+            snap_t = saved_gcal_snap.get(time_slot, "")
+            saved_e = saved_event_snap.get(time_slot, "")
+            if slot_claimed:
+                st.session_state[task_key] = new_cal
+            elif gcal_configured and not slot_claimed:
+                # このスロットに予定がない: DB に残った「カレンダー追跡中」のセルのみ空にする
+                if saved_e:
+                    st.session_state[task_key] = ""
+                elif db_task and snap_t and _gcal_text_same(db_task, snap_t):
+                    st.session_state[task_key] = ""
+                elif db_task and _gcal_stale_same_title_other_slot(
+                    time_slot, db_task, gcal_time_slots
+                ):
+                    st.session_state[task_key] = ""
+                else:
+                    st.session_state[task_key] = db_task
+            else:
+                st.session_state[task_key] = db_task
+        elif not _gcal_text_same(new_cal, prev_cal):
             # カレンダーが変化: ユーザーが手動編集していなければ更新
             current_val = st.session_state.get(task_key, "")
-            if current_val == prev_cal:
+            if _gcal_text_same(current_val, prev_cal):
                 st.session_state[task_key] = new_cal
+        elif _gcal_text_same(new_cal, "") and _gcal_text_same(prev_cal, ""):
+            # カレンダーは空のままだが、1 回目の初期化で DB から復活した自動同期残骸だけが残るケース
+            current_val = st.session_state.get(task_key, "")
+            snap_t = saved_gcal_snap.get(time_slot, "")
+            saved_e = saved_event_snap.get(time_slot, "")
+            if gcal_configured and not slot_claimed and saved_e:
+                st.session_state[task_key] = ""
+            elif (
+                current_val
+                and snap_t
+                and _gcal_text_same(current_val, snap_t)
+            ):
+                st.session_state[task_key] = ""
+            elif gcal_configured and not slot_claimed and current_val and _gcal_stale_same_title_other_slot(
+                time_slot, current_val, gcal_time_slots
+            ):
+                st.session_state[task_key] = ""
 
     # 次の再描画での変化検知のためにキャッシュを更新
     st.session_state[cal_cache_key] = {
@@ -1404,6 +1558,7 @@ if page == "📝 日次記録":
         sorted_acts = sorted(current, key=_action_sort_key)
         _apply_actions_to_state(dk, sorted_acts, len(actions))
         entry["actions"] = sorted_acts
+        _attach_pending_gcal_snapshot(dk, entry)
         db.save_daily_entry(entry)
         st.toast(f"「{_pending['action']}」をアクションに追加しました", icon="✅")
         st.rerun()
@@ -1445,6 +1600,7 @@ if page == "📝 日次記録":
         sorted_acts = sorted(updated_actions, key=_action_sort_key)
         _clear_action_keys(dk, len(actions))
         entry["actions"] = sorted_acts
+        _attach_pending_gcal_snapshot(dk, entry)
         db.save_daily_entry(entry)
         st.rerun()
 
@@ -1453,6 +1609,7 @@ if page == "📝 日次記録":
         sorted_acts = sorted(updated_actions, key=_action_sort_key)
         _clear_action_keys(dk, len(actions))
         entry["actions"] = sorted_acts
+        _attach_pending_gcal_snapshot(dk, entry)
         db.save_daily_entry(entry)
         st.rerun()
 
@@ -1497,6 +1654,7 @@ if page == "📝 日次記録":
             label_visibility="collapsed",
         )
 
+    _attach_pending_gcal_snapshot(dk, entry)
     db.save_daily_entry(entry)
     _inject_textarea_autoresize()
 
