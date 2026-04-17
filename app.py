@@ -1204,7 +1204,18 @@ if page == "📝 日次記録":
                 progress_prop=tasks_progress_prop,
             )
 
-        st.markdown("**予定・タスク**")
+        _hdr_sched, _hdr_btn = st.columns([3.2, 1.2])
+        with _hdr_sched:
+            st.markdown("**予定・タスク**")
+        with _hdr_btn:
+            if gcal_configured and st.button(
+                "予定を最新取得",
+                key=f"gcal_refresh_{dk}",
+                help="Google カレンダーのキャッシュを捨てて再取得し、タスク欄の同期もやり直します",
+                use_container_width=True,
+            ):
+                _cached_fetch_google_events.clear()
+                st.rerun()
         st.caption(
             "このアプリの日付・タイムゾーン基準で表示します。端末のカレンダーと日付がずれることがあります。"
         )
@@ -1284,20 +1295,10 @@ if page == "📝 日次記録":
         )
 
     day_label = "今日" if selected_date == today_local else "この日"
-    hdr1, hdr2 = st.columns([4.2, 1.2])
-    with hdr1:
-        st.markdown(
-            f'<div class="section-header">■ {day_label}の仕事は何か？（手入力・Google 予定とは別）</div>',
-            unsafe_allow_html=True,
-        )
-    with hdr2:
-        if gcal_configured and st.button(
-            "予定を最新取得",
-            key=f"gcal_refresh_{dk}",
-            help="Google カレンダーのキャッシュを捨てて再取得し、タスク欄の同期もやり直します",
-        ):
-            _cached_fetch_google_events.clear()
-            st.rerun()
+    st.markdown(
+        f'<div class="section-header">■ {day_label}の仕事は何か？（手入力・Google 予定とは別）</div>',
+        unsafe_allow_html=True,
+    )
 
     schedule = entry["schedule"]
 
